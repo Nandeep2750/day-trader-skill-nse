@@ -7,7 +7,7 @@ each stock has moved today, a flag on anything that touches your symbols and
 a warning when a company's results are due within the week.
 
     python3 news.py                                  # watchlist + plan + portfolio symbols
-    python3 news.py --tickers RELIANCE INFY M&M
+    python3 news.py --tickers RELIANCE INFY M&M      # or --tickers RELIANCE,INFY,M&M
     python3 news.py --tickers INFY --all --hours 72  # everything in the last 3 days, seen or not
     python3 news.py --no-nse                         # headlines only
     python3 news.py --no-moves                       # skip the price line per symbol
@@ -663,7 +663,7 @@ def main(argv=None):
 
     try:
         if args.tickers:
-            watch = {normalize_symbol(t): None for t in args.tickers}
+            watch = {normalize_symbol(t): None for arg in args.tickers for t in arg.split(",") if t.strip()}
             known = watch_from_files(args.portfolio, args.watchlist, args.plan)
             watch.update({t: known[t] for t in watch if known.get(t)})
         else:
