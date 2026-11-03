@@ -5,15 +5,15 @@ import unittest
 
 from _load import ROOT
 
-# v2, the day-trading pack: the eleven folders the reel's repo card shows
+# the NSE port: the nine folders (trader-analyst and trader-pelosi read US-only data and are gone)
 SKILLS = ["trader-scanner", "trader-news", "trader-entry", "trader-exit", "trader-timemachine",
-          "trader-risk", "trader-budget", "trader-broker", "trader-alerts", "trader-analyst",
-          "trader-pelosi"]
-ABOUT = ("11 Claude skills for day trading: scan thousands of charts, track breaking news, time every "
-         "entry and exit, and replay every outcome before you risk a dollar.")
+          "trader-risk", "trader-budget", "trader-broker", "trader-alerts"]
+GONE = ["trader-analyst", "trader-pelosi"]
+ABOUT = ("9 Claude skills for day trading on NSE: scan thousands of charts, track breaking news, time every "
+         "entry and exit, and replay every outcome before you risk a rupee.")
 # skills on the way to an order carry the safety block
 ORDER_PATH = ["trader-scanner", "trader-entry", "trader-exit", "trader-timemachine", "trader-budget",
-              "trader-pelosi", "trader-risk", "trader-broker", "trader-alerts"]
+              "trader-risk", "trader-broker", "trader-alerts"]
 V1_ONLY = ["trader-copycat", "trader-screener", "trader-tax", "trader-rebalance"]
 
 
@@ -33,14 +33,14 @@ def every_text_file():
 
 
 class Repo(unittest.TestCase):
-    def test_eleven_skill_folders_at_the_root(self):
+    def test_nine_skill_folders_at_the_root(self):
         found = sorted(d for d in os.listdir(ROOT)
                        if os.path.isfile(os.path.join(ROOT, d, "SKILL.md")))
         self.assertEqual(found, sorted(SKILLS))
 
-    def test_root_matches_the_reel(self):
-        root = sorted(d for d in os.listdir(ROOT) if not d.startswith(".git"))
-        self.assertEqual(root, sorted([".claude-plugin", "LICENSE", "README.md", "tests"] + SKILLS))
+    def test_root_holds_only_the_pack(self):
+        root = sorted(d for d in os.listdir(ROOT) if d not in (".git", ".DS_Store"))
+        self.assertEqual(root, sorted([".claude-plugin", ".gitignore", "LICENSE", "README.md", "tests"] + SKILLS))
 
     def test_frontmatter_name_and_description(self):
         for s in SKILLS:
@@ -60,26 +60,37 @@ class Repo(unittest.TestCase):
     def test_plugin_manifest_points_at_the_root_skills(self):
         with open(os.path.join(ROOT, ".claude-plugin", "plugin.json")) as fh:
             plugin = json.load(fh)
-        self.assertEqual(plugin["name"], "day-trader-skill")
+        self.assertEqual(plugin["name"], "day-trader-skill-nse")
         self.assertEqual(plugin["skills"], "./")
         self.assertEqual(plugin["description"], ABOUT)
         with open(os.path.join(ROOT, ".claude-plugin", "marketplace.json")) as fh:
             market = json.load(fh)
-        self.assertEqual(market["name"], "day-trader-skill")
-        self.assertEqual(market["plugins"][0]["name"], "day-trader-skill")
+        self.assertEqual(market["name"], "day-trader-skill-nse")
+        self.assertEqual(market["plugins"][0]["name"], "day-trader-skill-nse")
 
-    def test_readme_carries_the_reel_copy(self):
+    def test_readme_carries_the_pack_copy(self):
         with open(os.path.join(ROOT, "README.md"), encoding="utf-8") as fh:
             readme = " ".join(fh.read().split())
-        self.assertTrue(readme.startswith("# The Day Trader skill"))
+        self.assertTrue(readme.startswith("# The Day Trader skill, NSE edition"))
         for line in (ABOUT,
-                     "https://github.com/Jakeschincariol/day-trader-skill install skill",
-                     "/plugin marketplace add Jakeschincariol/day-trader-skill",
-                     "/plugin install day-trader-skill@day-trader-skill",
+                     "https://github.com/Jakeschincariol/day-trader-skill",
+                     "/plugin install day-trader-skill-nse@day-trader-skill-nse",
+                     "Zerodha", "Angel One",
                      "## Fine print"):
             self.assertIn(line, readme)
         for s in SKILLS:
             self.assertIn("/" + s, readme, s)
+
+    def test_no_us_only_skill_or_endpoint_is_left_behind(self):
+        for path in every_text_file():
+            rel = os.path.relpath(path, ROOT)
+            if rel == "README.md" or rel.startswith("tests" + os.sep):
+                continue  # the README says what was dropped and why; tests may name old keys to refuse them
+            with open(path, encoding="utf-8", errors="replace") as fh:
+                text = fh.read()
+            for old in GONE + ["sec.gov", "nasdaqtrader", "alpaca", "Alpaca", "pdt_guard",
+                               "America/New_York", "eastern_offset"]:
+                self.assertNotIn(old, text, "%s still mentions %s" % (rel, old))
 
     def test_no_em_dashes_and_no_personal_email(self):
         for path in every_text_file():
@@ -121,9 +132,12 @@ class Repo(unittest.TestCase):
     def test_day_trading_limits_ship_in_the_example_config(self):
         with open(os.path.join(ROOT, "trader-budget", "config.example.json")) as fh:
             cfg = json.load(fh)
-        for k in ("max_loss_per_trade_usd", "max_daily_loss_usd", "max_trades_per_day",
-                  "min_reward_risk", "require_stop", "no_entries_after", "flat_by"):
+        for k in ("max_loss_per_trade_inr", "max_daily_loss_inr", "max_trades_per_day",
+                  "min_reward_risk", "require_stop", "no_entries_after", "flat_by", "broker", "product"):
             self.assertIn(k, cfg, k)
+        self.assertIn(cfg["broker"], ("zerodha", "angelone"))
+        self.assertEqual(cfg["product"], "MIS")
+        self.assertLessEqual(cfg["flat_by"], "15:10")  # before both brokers' MIS auto square-off
         self.assertIs(cfg["require_stop"], True)
         self.assertIs(cfg.get("allow_short", False), False)
         self.assertIs(cfg.get("allow_margin", False), False)

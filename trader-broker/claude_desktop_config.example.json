@@ -1,13 +1,25 @@
 {
   "mcpServers": {
-    "alpaca": {
-      "command": "uvx",
-      "args": ["alpaca-mcp-server"],
+    "kite": {
+      "command": "/full/path/to/kite-mcp-server",
       "env": {
-        "ALPACA_API_KEY": "YOUR_PAPER_API_KEY_TYPED_HERE_NEVER_IN_CHAT",
-        "ALPACA_SECRET_KEY": "YOUR_PAPER_SECRET_KEY_TYPED_HERE_NEVER_IN_CHAT",
-        "ALPACA_PAPER_TRADE": "true",
-        "ALPACA_TOOLSETS": "account,trading,stock-data"
+        "APP_MODE": "stdio",
+        "KITE_API_KEY": "YOUR_KITE_CONNECT_API_KEY_TYPED_HERE_NEVER_IN_CHAT",
+        "KITE_API_SECRET": "YOUR_KITE_CONNECT_API_SECRET_TYPED_HERE_NEVER_IN_CHAT"
+      }
+    },
+    "angel-one": {
+      "command": "npx",
+      "args": ["-y", "angel-one-mcp"],
+      "env": {
+        "ANGEL_API_KEY": "YOUR_SMARTAPI_KEY_TYPED_HERE_NEVER_IN_CHAT",
+        "ANGEL_CLIENT_ID": "YOUR_CLIENT_ID_TYPED_HERE_NEVER_IN_CHAT",
+        "ANGEL_PASSWORD": "YOUR_MPIN_TYPED_HERE_NEVER_IN_CHAT",
+        "ANGEL_TOTP_SECRET": "YOUR_TOTP_SECRET_TYPED_HERE_NEVER_IN_CHAT",
+        "SOFT_MAX_ORDER_QTY": "100",
+        "HARD_MAX_ORDER_QTY": "500",
+        "SOFT_MAX_ORDER_VALUE": "80000",
+        "HARD_MAX_ORDER_VALUE": "80000"
       }
     }
   }

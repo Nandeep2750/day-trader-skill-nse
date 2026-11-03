@@ -1,0 +1,20 @@
+{
+  "created_by": "trader-exit",
+  "symbol": "RELIANCE",
+  "side": "buy",
+  "date": "2026-11-03",
+  "setup": "orb",
+  "entry": 1300.0,
+  "interval": "5m",
+  "opening_range": {"high": 1306.6, "low": 1284.3, "minutes": 15},
+  "stop": 1295.5,
+  "stop_rule": "or_mid",
+  "stop_label": "opening-range midpoint",
+  "target": 1304.5,
+  "target_r": 1.0,
+  "target_label": "1R (one times the risk)",
+  "risk_per_share": 4.5,
+  "reward_risk": 1.0,
+  "flat_by": "15:10",
+  "note": "A test plan for the alerts: the opening range is RELIANCE's real 2026-11-03 range, the entry is made up."
+}

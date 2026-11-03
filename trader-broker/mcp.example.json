@@ -1,0 +1,28 @@
+{
+  "mcpServers": {
+    "kite": {
+      "type": "stdio",
+      "command": "/full/path/to/kite-mcp-server",
+      "env": {
+        "APP_MODE": "stdio",
+        "KITE_API_KEY": "${KITE_API_KEY}",
+        "KITE_API_SECRET": "${KITE_API_SECRET}"
+      }
+    },
+    "angel-one": {
+      "type": "stdio",
+      "command": "npx",
+      "args": ["-y", "angel-one-mcp"],
+      "env": {
+        "ANGEL_API_KEY": "${ANGEL_API_KEY}",
+        "ANGEL_CLIENT_ID": "${ANGEL_CLIENT_ID}",
+        "ANGEL_PASSWORD": "${ANGEL_PASSWORD}",
+        "ANGEL_TOTP_SECRET": "${ANGEL_TOTP_SECRET}",
+        "SOFT_MAX_ORDER_QTY": "100",
+        "HARD_MAX_ORDER_QTY": "500",
+        "SOFT_MAX_ORDER_VALUE": "80000",
+        "HARD_MAX_ORDER_VALUE": "80000"
+      }
+    }
+  }
+}

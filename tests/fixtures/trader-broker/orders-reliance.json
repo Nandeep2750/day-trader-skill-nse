@@ -1,0 +1,35 @@
+{
+  "created_by": "trader-budget",
+  "created_at": "2026-10-19T04:20:00Z",
+  "status": "proposed",
+  "paper": true,
+  "note": "Proposals only. Nothing is placed until trader-risk passes each order and you say yes to it in the chat.",
+  "source": "trader/plan.json (RELIANCE orb 2026-10-19)",
+  "orders": [
+    {
+      "symbol": "RELIANCE",
+      "exchange": "NSE",
+      "product": "MIS",
+      "side": "buy",
+      "qty": "65",
+      "type": "market",
+      "time_in_force": "day",
+      "order_class": "bracket",
+      "take_profit_limit_price": "1240.20",
+      "stop_loss_stop_price": "1215.40",
+      "why": "opening-range breakout on RELIANCE: 65 shares, bound by your max order of 80,000 (65 x 12.40 = 806 at the stop)",
+      "plan": {
+        "entry": 1227.8,
+        "stop": 1215.4,
+        "target": 1240.2,
+        "risk_per_share": 12.4,
+        "loss_at_stop": 806.0,
+        "charges": 61.17,
+        "max_loss": 867.17,
+        "setup": "orb",
+        "entry_time": "9:50 AM",
+        "flat_by": "15:10"
+      }
+    }
+  ]
+}

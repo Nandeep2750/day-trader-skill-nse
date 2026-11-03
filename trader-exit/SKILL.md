@@ -1,17 +1,19 @@
 ---
 name: trader-exit
 description: >-
-  Exit Planner. Sets your stop and your target before you enter, so you know
-  when to get out. Reads the entry from trader-entry (or a price you give),
-  puts the stop at the opening-range midpoint by default (or the range low,
-  your price, a percent, or a multiple of the ATR), rounds it down to the
-  cent, and sets the target at 2R (or 1R, or your price). Refuses a stop at or
-  above the entry, a target at or below it, or a stop too tight to survive the
-  spread, and says why. Writes trader/plan.json for the Time Machine, the
-  Budget Manager and Price Alerts. Long side only. Use when the user says
-  "where's my stop", "set my stop and target", "plan the exit", "when do I get
-  out", "stop loss", "what's my R", "risk reward", or right after
-  /trader-entry triggers, before /trader-timemachine.
+  Exit Planner for NSE stocks. Sets your stop and your target before you
+  enter, so you know when to get out. Reads the entry from trader-entry (or a
+  price you give), puts the stop at the opening-range midpoint by default (or
+  the range low, your price, a percent, or a multiple of the ATR), puts every
+  price on the NSE tick for its price band without ever growing the risk, and
+  sets the target at 2R (or 1R, or your price). Refuses a stop at or above
+  the entry, a target at or below it, or a stop too tight to survive the
+  spread, and says why. Flat by 15:10 IST by default, before Zerodha's and
+  Angel One's intraday auto square-off. Writes trader/plan.json for the Time
+  Machine, the Budget Manager and Price Alerts. Long side only. Use when the
+  user says "where's my stop", "set my stop and target", "plan the exit",
+  "when do I get out", "stop loss", "what's my R", "risk reward", or right
+  after /trader-entry triggers, before /trader-timemachine.
 argument-hint: "[--stop or-mid|or-low|price:X|pct:X|atr:K] [--target 2R|1R|price:X]"
 ---
 
@@ -24,28 +26,31 @@ anything in the middle of a fast move. A stop is a plan, not a guarantee: a
 gap or a fast market can fill past it. Day trading loses most people money,
 and a neat plan does not change that.
 
+NSE cash market only, prices in rupees, times in IST. Symbols are plain NSE
+symbols (`RELIANCE`, `M&M`); a trailing `.NS` is dropped, `.BO` is refused.
+
 `${CLAUDE_SKILL_DIR}` below is this skill's folder (where this SKILL.md lives).
 
 ```bash
 python3 "${CLAUDE_SKILL_DIR}/exit.py" plan                          # trader/entry.json: midpoint stop, 2R target
 python3 "${CLAUDE_SKILL_DIR}/exit.py" plan --stop or-mid --target 1R --write
 python3 "${CLAUDE_SKILL_DIR}/exit.py" plan --stop atr:1.5           # needs the session's bars (Yahoo or --offline)
-python3 "${CLAUDE_SKILL_DIR}/exit.py" plan --symbol TSLA --entry 364.18 --or-high 362.18 --or-low 354.47
+python3 "${CLAUDE_SKILL_DIR}/exit.py" plan --symbol RELIANCE --entry 1174.30 --or-high 1170.50 --or-low 1156.20
 python3 "${CLAUDE_SKILL_DIR}/exit.py" show                          # the current trader/plan.json
 ```
 
-Other flags: `--flat-by 15:55`, `--json`, `--now "2026-10-19 10:15"` (New
-York time), `--entry PRICE` with a waiting entry.json to plan ahead, `--setup
-level`, `--offline FILE` (a saved Yahoo chart JSON for an ATR stop).
+Other flags: `--flat-by 15:10`, `--json`, `--now "2026-10-29 09:41"` (IST),
+`--entry PRICE` with a waiting entry.json to plan ahead, `--setup level`,
+`--offline FILE` (a saved Yahoo chart JSON for an ATR stop).
 
 ## What it reads and writes
 
 | file | what |
 | --- | --- |
 | `trader/entry.json` | the trigger from trader-entry: symbol, entry price, time, bar, opening range |
-| `trader/config.json` | `flat_by` (15:55) and `min_reward_risk` (1.0: a note here, trader-risk enforces it) |
-| Yahoo chart API | only for an `atr:K` stop: the session's bars up to the entry bar, free and unofficial |
-| `trader/plan.json` | with `--write`: entry, stop and its rule, target and its R, risk a share, reward:risk, flat by. trader-timemachine, trader-budget and trader-alerts read it |
+| `trader/config.json` | `flat_by` (15:10), `min_reward_risk` (1.0: a note here, trader-risk enforces it) and `broker` (`zerodha` or `angelone`, for the square-off warning) |
+| Yahoo chart API | only for an `atr:K` stop: the session's bars for `SYMBOL.NS` up to the entry bar, free and unofficial |
+| `trader/plan.json` | with `--write`: symbol, exchange (NSE), entry, stop and its rule, target and its R, risk a share, reward:risk, flat by. trader-timemachine, trader-budget and trader-alerts read it |
 
 ## Stops and targets
 
@@ -59,16 +64,24 @@ level`, `--offline FILE` (a saved Yahoo chart JSON for an ATR stop).
 
 A level setup has no opening range to lean on, so it needs a stop you name.
 
-- **Rounding.** The stop rounds AWAY from the entry to the cent (down, for a
-  long). Risk = entry minus stop. Target = entry + R x risk, rounded half up
-  to the cent. `2R` by default; `1R`, `1.5R` or `price:X` also work.
+- **NSE ticks.** Every price the plan writes is on the tick for its price
+  band, so the broker will take it: below ₹250 the tick is ₹0.01, below
+  ₹1,000 ₹0.05, below ₹5,000 ₹0.10, below ₹10,000 ₹0.50, below ₹20,000 ₹1.00,
+  above that ₹5.00. NSE reviews the bands every month.
+- **Rounding never grows the risk.** A long's stop rounds UP to the tick
+  (toward the entry), the target rounds DOWN. Risk = entry minus stop.
+  Target = entry + R x risk. `2R` by default; `1R`, `1.5R` or `price:X` also
+  work.
 - **Refused, with the reason.** A stop at or above the entry. A target at or
   below it. A risk under 0.05% of the price: too tight to survive the
   spread, normal wiggle would stop you out. An entry.json that has not
   triggered (unless you give `--entry`). A short: v2 plans longs only.
-- **Flat by.** 15:55 by default (or `flat_by` in the config). Out by then,
-  win or lose, no overnight hold. On a 1:00 p.m. early close it moves up to
-  12:55. An entry at or after the flat-by time is refused.
+- **Flat by.** 15:10 IST by default (or `flat_by` in the config). Out by
+  then, win or lose, no overnight hold. Brokers square off intraday (MIS)
+  positions themselves near the close, at the market and with a fee:
+  Zerodha from 15:20, Angel One from 15:15. A flat-by at or after your
+  broker's square-off gets a warning. A flat-by at or after the 15:30 close,
+  or an entry at or after the flat-by time, is refused.
 
 ## Steps
 
@@ -86,24 +99,24 @@ A level setup has no opening range to lean on, so it needs a stop you name.
    the target and the flat-by time. Claude can keep `entry.py watch` running
    in the background or on a `/loop` until a setup triggers, then come here.
 
-## Example: the reel
+## Example: the walkthrough
 
-TSLA, Monday 2026-10-19. The entry is 364.18 at 10:15 AM (the 10:10 bar,
-bar 8) and the opening range is 354.47 to 362.18. `exit.py plan --stop
+RELIANCE, Thursday 2026-10-29. The entry is 1174.30 at 9:40 AM (the 9:35 bar,
+bar 4) and the opening range is 1156.20 to 1170.50. `exit.py plan --stop
 or-mid --target 1R --write`:
 
 ```
-Exit plan: TSLA long, Mon 2026-10-19, opening-range breakout on 5-minute bars
-  Entry         $364.18 at 10:15 AM (bar 8)
-  Stop          $358.32  opening-range midpoint: ($362.18 + $354.47) / 2 = $358.325, rounded down
-  Target        $370.04  1R (one times the risk)
-  Risk a share  $5.86 (1.61% of the entry)
+Exit plan: RELIANCE (NSE) long, Thu 2026-10-29, opening-range breakout on 5-minute bars
+  Entry         ₹1,174.30 at 9:40 AM (bar 4)
+  Stop          ₹1,163.40  opening-range midpoint: (₹1,170.50 + ₹1,156.20) / 2 = ₹1163.35, rounded up to the ₹0.10 tick
+  Target        ₹1,185.20  1R (one times the risk)
+  Risk a share  ₹10.90 (0.93% of the entry)
   Reward:risk   1.0
-  Flat by       15:55 ET, win or lose: no overnight hold
+  Flat by       15:10 IST, win or lose: no overnight hold
 ```
 
-The default 2R target would be 364.18 + 2 x 5.86 = 375.90. trader-budget then
-sizes it: a $50 max loss per trade buys floor(50 / 5.86) = 8 shares.
+The default 2R target would be 1174.30 + 2 x 10.90 = 1196.10. trader-budget
+then sizes it to your max loss per trade, estimated charges included.
 
 ## Rules
 
@@ -128,5 +141,6 @@ make a plan pass, and never calls a stop a guarantee.
   passed that exact order today, the user typed an explicit yes for that one order in the chat, and the
   user clicked Allow once on Claude's own card because the order tool is set to "Needs approval"
   (Customize > Connectors > tool permissions). Never set an order tool to "Always allow".
-- No options, margin, short selling or leverage unless the config allows it and the user confirms.
-- Broker keys live in environment variables or the Claude Desktop config, never in the chat.
+- No options, futures, margin, short selling or leverage unless the config allows it and the user confirms.
+- Broker keys (Kite Connect, Angel One SmartAPI) live in environment variables or the Claude Desktop
+  config, never in the chat.

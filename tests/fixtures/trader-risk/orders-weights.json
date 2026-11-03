@@ -1,0 +1,51 @@
+{
+  "created_by": "trader-budget",
+  "status": "proposed",
+  "orders": [
+    {
+      "symbol": "RELIANCE",
+      "exchange": "NSE",
+      "side": "buy",
+      "qty": "19",
+      "type": "market",
+      "time_in_force": "day",
+      "product": "CNC"
+    },
+    {
+      "symbol": "HDFCBANK",
+      "exchange": "NSE",
+      "side": "buy",
+      "qty": "24",
+      "type": "market",
+      "time_in_force": "day",
+      "product": "CNC"
+    },
+    {
+      "symbol": "INFY",
+      "exchange": "NSE",
+      "side": "buy",
+      "qty": "12",
+      "type": "market",
+      "time_in_force": "day",
+      "product": "CNC"
+    },
+    {
+      "symbol": "ITC",
+      "exchange": "NSE",
+      "side": "buy",
+      "qty": "34",
+      "type": "market",
+      "time_in_force": "day",
+      "product": "CNC"
+    },
+    {
+      "symbol": "TCS",
+      "exchange": "NSE",
+      "side": "buy",
+      "qty": "3",
+      "type": "market",
+      "time_in_force": "day",
+      "product": "CNC"
+    }
+  ]
+}
