@@ -557,6 +557,21 @@ class Cli(unittest.TestCase):
     def tearDown(self):
         shutil.rmtree(self.d)
 
+    def test_history_without_a_plan_before_the_open(self):
+        """The README's history line (26 fired: 12 target, 11 stop, 3 close) with no plan at all, at 9:00."""
+        code, text, err = run(["history", "reliance.ns", "--target-r", "1", "--offline", RELIANCE,
+                               "--now", "2026-10-29 09:00", "--json"])
+        self.assertEqual(code, 0, err)
+        h = json.loads(text)["history"]["RELIANCE"]
+        self.assertEqual((h["sessions"], h["triggered"], h["target"], h["stop"], h["close"]), (55, 26, 12, 11, 3))
+        self.assertNotIn("trades", h)
+        code, text, _ = run(["history", "RELIANCE", "NOPE", "--offline", RELIANCE, "--now", "2026-10-29 09:00"])
+        self.assertEqual(code, 0)
+        self.assertIn("of 55 sessions fired", text)
+        self.assertIn("error: NOPE", text)
+        self.assertEqual(run(["history", "RELIANCE", "--stop-rule", "pct", "--offline", RELIANCE])[0], 1)
+        self.assertEqual(run(["history", "RELIANCE", "--or-minutes", "7", "--offline", RELIANCE])[0], 1)
+
     def test_run_with_the_plan_end_to_end(self):
         code, text, err = run(["run", "--plan", self.plan, "--offline", RELIANCE, "--now", NOW, "--seed", "29",
                                "--write", self.out])

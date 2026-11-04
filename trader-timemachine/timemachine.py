@@ -941,6 +941,66 @@ def compute(a):
     return time_machine(text, plan, now, a.replays, a.seed, a.window, a.until, source)
 
 
+def rule_history(text, sym, rule, now_utc, until=FLAT_BY):
+    """The opening-range breakout rule on a symbol's own past complete sessions, before today (IST), with no
+    plan needed: for picking what to watch before the open. -> history_replay's summary, trades left out."""
+    sym = nse_symbol(sym)
+    meta, bars, _ = parse_bars(chart_result(text, sym), now_utc)
+    msym = str(meta.get("symbol") or "").upper()
+    if msym and msym != sym + ".NS":
+        raise TMError("the data is for %s, not %s.NS" % (msym, sym))
+    until_min = parse_clock(until, "--until")
+    if (until_min - OPEN_MIN) % 5 or not OPEN_MIN < until_min <= CLOSE_MIN:
+        raise TMError("--until must be on the 5-minute grid, after 9:15 AM and no later than %s" % clock12(CLOSE_MIN))
+    last = (until_min - OPEN_MIN) // 5 - 1
+    if last <= rule["or_minutes"] // 5:
+        raise TMError("--until leaves nothing after the opening range")
+    sessions, _ = full_sessions(split_sessions(bars), to_ist(now_utc).date().isoformat(), last)
+    if len(sessions) < MIN_SESSIONS:
+        raise TMError("only %d complete session(s) of %s in the data; the history needs at least %d"
+                      % (len(sessions), sym, MIN_SESSIONS))
+    h = history_replay(sessions, rule, last)
+    return {k: v for k, v in h.items() if k != "trades"}
+
+
+def cmd_history(a):
+    """The breakout rule's record on each symbol's last ~60 days: no plan, no entry, works before the open."""
+    if a.target_r <= 0 or a.or_minutes % 5 or not 5 <= a.or_minutes <= 60:
+        raise TMError("--target-r must be positive and --or-minutes 5 to 60 in steps of 5")
+    if a.stop_rule == "pct" and not (a.stop_pct or 0) > 0:
+        raise TMError("--stop-rule pct needs --stop-pct")
+    rule = {"setup": "orb", "or_minutes": a.or_minutes, "stop_rule": a.stop_rule, "target_r": a.target_r}
+    if a.stop_rule == "pct":
+        rule["stop_pct"] = a.stop_pct
+    now = parse_now(a.now)
+    out, errors = {}, []
+    for n, raw in enumerate(a.symbols):
+        try:
+            sym = nse_symbol(raw)
+            if a.offline:
+                text = read_offline(a.offline, sym)
+            else:
+                if n:
+                    _sleep(PAUSE)
+                text = fetch_chart(sym)
+            out[sym] = rule_history(text, sym, rule, now, a.until)
+        except TMError as e:
+            errors.append("%s: %s" % (raw, e))
+    if a.json:
+        print(json.dumps({"rule": rule, "until": a.until, "history": out, "errors": errors}, indent=2))
+    else:
+        print("The %d-min opening-range breakout, stop %s, target %sR, out by %s, on each symbol's own past "
+              "sessions:" % (a.or_minutes, a.stop_rule, a.target_r, a.until))
+        for sym, h in sorted(out.items(), key=lambda kv: -(kv[1]["avg_R"] if kv[1]["avg_R"] is not None else -9)):
+            print("  %-12s %2d of %2d sessions fired: %2d target, %2d stop, %2d close, average R %s" % (
+                sym, h["triggered"], h["sessions"], h["target"], h["stop"], h["close"],
+                "-" if h["avg_R"] is None else "%+.3f" % h["avg_R"]))
+        for e in errors:
+            print("  error: " + e)
+        print("History, not a forecast: about 30 trades a symbol is a small sample.")
+    return 0 if out else 1
+
+
 def cmd_run(a):
     doc = compute(a)
     if a.write:
@@ -1005,12 +1065,22 @@ def main(argv=None):
     common(p)
     p.add_argument("--from", dest="from_file", nargs="?", const="trader/timemachine.json", metavar="PATH",
                    help="draw a saved result instead of running again")
+    p = sub.add_parser("history", help="the breakout rule on symbols' past sessions, no plan (before the open)")
+    p.add_argument("symbols", nargs="+")
+    p.add_argument("--or-minutes", type=int, default=15)
+    p.add_argument("--stop-rule", default="or_mid", choices=["or_mid", "or_low", "pct"])
+    p.add_argument("--stop-pct", type=float, help="for --stop-rule pct: the stop as a percent of the entry")
+    p.add_argument("--target-r", type=float, default=2.0)
+    p.add_argument("--until", default=FLAT_BY, help="out at this IST time (default 15:10)")
+    p.add_argument("--offline", metavar="PATH", help="a saved chart file, or a folder of <SYM>-60d5m.json(.gz)")
+    p.add_argument("--now", help='pretend it is this time ("2026-11-04 09:00" IST)')
+    p.add_argument("--json", action="store_true")
     a = ap.parse_args(argv)
     if not a.cmd:
         ap.print_help()
         return 1
     try:
-        return {"run": cmd_run, "chart": cmd_chart}[a.cmd](a)
+        return {"run": cmd_run, "chart": cmd_chart, "history": cmd_history}[a.cmd](a)
     except TMError as e:
         print("timemachine.py: %s" % e, file=sys.stderr)
         return 1

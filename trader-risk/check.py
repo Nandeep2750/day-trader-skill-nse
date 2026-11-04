@@ -361,6 +361,8 @@ def fingerprint(order, cfg=None):
     payload["product_resolved"] = str(order.get("product") or c.get("product") or "MIS").strip().upper()
     payload["broker"] = str(c.get("broker") or "zerodha").strip().lower()
     payload["paper"] = is_paper(c)
+    if str(c.get("target_order") or "").strip():
+        payload["target_order"] = str(c["target_order"]).strip().lower()
     blob = json.dumps(payload, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(blob.encode("utf-8")).hexdigest()
 

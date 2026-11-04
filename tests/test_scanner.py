@@ -1114,6 +1114,19 @@ class VolatileRound2(unittest.TestCase):
                 vol_scan(self.data, VOL_NOW, **kw)
 
 
+class PreOpen(unittest.TestCase):
+    def test_no_todays_bar_before_the_open(self):
+        """A replay at 08:55 must not see today's bar (stamped 09:15) even if the data already has it."""
+        t = lambda d, hh, mm: int((datetime.datetime(*d, hh, mm) - datetime.timedelta(hours=5, minutes=30)
+                                   - datetime.datetime(1970, 1, 1)).total_seconds())
+        series = {"t": [t((2026, 11, 3), 9, 15), t((2026, 11, 4), 9, 15)], "c": [100.0, 130.0],
+                  "h": [101.0, 131.0], "l": [99.0, 120.0], "v": [10, 20]}
+        done, live = scan.day_bars(series, scan.ist_to_utc(datetime.datetime(2026, 11, 4, 8, 55)))
+        self.assertEqual(([b["d"].isoformat() for b in done], live), (["2026-11-03"], None))
+        done, live = scan.day_bars(series, scan.ist_to_utc(datetime.datetime(2026, 11, 4, 10, 0)))
+        self.assertEqual(live["c"], 130.0)
+
+
 class VolatileNetwork(unittest.TestCase):
     """The volatile scan's requests, without the network."""
 

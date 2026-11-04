@@ -79,15 +79,19 @@ TITLE = "Day trader autopilot"
 # The only tools a tick may run. The broker's ticket tool is deliberately absent.
 ALLOWED_TOOLS = ("trader-news/news.py", "trader-entry/entry.py", "trader-exit/exit.py",
                  "trader-timemachine/timemachine.py", "trader-budget/size.py", "trader-risk/check.py",
-                 "trader-alerts/alerts.py")
+                 "trader-alerts/alerts.py", "trader-scanner/scan.py")
 TICKET = "trader-broker/ticket.py"
 # Auto-paper mode only: the broker's ticket tool joins, for the calls ticket_args_ok allows.
 AUTO_PAPER_TOOLS = ALLOWED_TOOLS + (TICKET,)
 # Tools that take --now (checked against each tool's --help). alerts.py add does not.
-TAKES_NOW = {("trader-alerts/alerts.py", "quote"), (TICKET, "show"), (TICKET, "approve"), (TICKET, "result"), (TICKET, "flatten"), (TICKET, "log"),
+TAKES_NOW = {("trader-alerts/alerts.py", "quote"), ("trader-alerts/alerts.py", "bars"), (TICKET, "show"), (TICKET, "approve"), (TICKET, "result"), (TICKET, "flatten"), (TICKET, "log"),
 ("trader-news/news.py", None), ("trader-entry/entry.py", "check"), ("trader-exit/exit.py", "plan"),
              ("trader-timemachine/timemachine.py", "run"), ("trader-budget/size.py", None),
-             ("trader-risk/check.py", None), ("trader-alerts/alerts.py", "check")}
+             ("trader-risk/check.py", None), ("trader-alerts/alerts.py", "check"),
+             ("trader-scanner/scan.py", "volatile"), ("trader-timemachine/timemachine.py", "history")}
+PICK_TIMEOUT = 300        # seconds for one morning-pick tool call (a NIFTY 500 scan); ticks meanwhile skip (the lock)
+PICK_DEFAULTS = {"index": "nifty500", "candidates": 20, "top": 4, "at": "08:55", "until": "09:25",
+                 "min_avg_r": 0.0, "min_trades": 15}
 
 # Fallback only: the scanner's NSE_HOLIDAYS is read first, so the pack keeps one list.
 NSE_HOLIDAYS_2026 = {  # NSE equity segment trading holidays, 2026 (weekdays only)
@@ -143,6 +147,19 @@ def ticket_args_ok(args):
 
 
 # ---------------------------------------------------------------- time and calendar
+
+def scan_args_ok(args):
+    """scan.py only as the morning pick runs it: volatile, an index, a top N, an --out under trader/autopilot/,
+    --quiet, and --now in a replay. Never universe or daily, which would overwrite the symbol lists."""
+    a = list(args)
+    if "--now" in a:
+        i = a.index("--now")
+        a = a[:i] + a[i + 2:]
+    return (len(a) == 8 and a[0] == "volatile" and a[1] == "--index" and a[2] in ("nifty500", "all")
+            and a[3] == "--top" and a[4].isdigit() and a[5] == "--out"
+            and a[6].startswith(os.path.join("trader", "autopilot", "pick-volatile-")) and ".." not in a[6]
+            and a[7] == "--quiet")
+
 
 def now_ist():
     return datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None) + IST
@@ -261,6 +278,7 @@ def settings(cfg):
         s["max_trades"] = int(cfg.get("max_trades_per_day", 3))
     except (TypeError, ValueError):
         raise AutopilotError("max_trades_per_day must be a whole number")
+    s["pick"] = pick_settings(auto.get("auto_pick"))
     s["news_at_t"] = parse_hhmm(s["news_at"], "autopilot.news_at")
     s["entry_from_t"] = parse_hhmm(s["entry_from"], "autopilot.entry_from")
     s["flat_by_t"] = parse_hhmm(cfg.get("flat_by") or "15:10", "flat_by")
@@ -278,6 +296,36 @@ def settings(cfg):
         s["warnings"].append("autopilot.entry_from %s is after no_entries_after: no entry check runs"
                              % s["entry_from"])
     return s
+
+
+def pick_settings(raw):
+    """autopilot.auto_pick: true (the defaults), false / missing (off), or an object overriding them."""
+    if raw in (None, False):
+        return None
+    if raw is True:
+        raw = {}
+    if not isinstance(raw, dict):
+        raise AutopilotError("autopilot.auto_pick must be true, false or an object, not %r" % (raw,))
+    if raw.get("enabled") is False:
+        return None
+    p = dict(PICK_DEFAULTS)
+    p.update({k: v for k, v in raw.items() if k in PICK_DEFAULTS and v not in (None, "")})
+    if p["index"] not in ("nifty500", "all"):
+        raise AutopilotError('autopilot.auto_pick.index must be "nifty500" or "all"')
+    for k, lo, hi in (("candidates", 1, 40), ("top", 1, 10), ("min_trades", 0, 60)):
+        if isinstance(p[k], bool) or not isinstance(p[k], int) or not lo <= p[k] <= hi:
+            raise AutopilotError("autopilot.auto_pick.%s must be a whole number from %d to %d" % (k, lo, hi))
+    try:
+        p["min_avg_r"] = float(p["min_avg_r"])
+    except (TypeError, ValueError):
+        raise AutopilotError("autopilot.auto_pick.min_avg_r must be a number")
+    p["at_t"] = parse_hhmm(p["at"], "autopilot.auto_pick.at")
+    p["until_t"] = parse_hhmm(p["until"], "autopilot.auto_pick.until")
+    if p["until_t"] < p["at_t"]:
+        raise AutopilotError("autopilot.auto_pick.until must not be before its at")
+    if p["top"] > p["candidates"]:
+        raise AutopilotError("autopilot.auto_pick.top cannot be more than its candidates")
+    return p
 
 
 def symbols(project, cfg, today=None, hol=None):
@@ -341,6 +389,8 @@ class SubprocessRunner:
         if tool == TICKET and not ticket_args_ok(args):
             raise AutopilotError("refusing ticket.py %s: only show, log, flatten, approve --auto-paper and "
                                  "result --status paper are allowed" % " ".join(args))
+        if tool == "trader-scanner/scan.py" and not scan_args_ok(args):
+            raise AutopilotError("refusing scan.py %s: only the morning pick's volatile scan is allowed" % " ".join(args))
         cmd = [self.python, os.path.join(self.skills, tool)] + list(args)
         try:
             p = subprocess.run(cmd, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
@@ -411,6 +461,8 @@ class Day:
 
     def run(self, tool, *args):
         args = list(args)
+        if tool == "trader-scanner/scan.py" and not scan_args_ok(args):
+            raise AutopilotError("refusing scan.py %s: only the morning pick's volatile scan is allowed" % " ".join(args))
         if tool == TICKET and not (self.auto_paper and ticket_args_ok(args)):
             raise AutopilotError("refusing ticket.py %s outside auto-paper mode or its allowed calls"
                                  % " ".join(args))
@@ -730,6 +782,55 @@ def quotes_for(day, syms):
     return out
 
 
+def bars_for(day, syms):
+    """{SYM: today's 1-minute bars} from alerts.py bars (read-only). Missing or failed symbols are left out:
+    their exits fall back to the quote alone."""
+    syms = [s for s in syms if s]
+    if not syms:
+        return {}
+    code, doc = day.run_json("trader-alerts/alerts.py", "bars", *(syms + ["--interval", "1m", "--json"]))
+    if not isinstance(doc, dict) or doc.get("date") != day.date:
+        return {}
+    return {str(k).upper(): v for k, v in (doc.get("bars") or {}).items() if isinstance(v, list)}
+
+
+def bar_touch(trade, bars, date):
+    """(reason, price, bar HH:MM) for the first 1-minute bar after the entry whose low reached the stop or
+    whose high reached the target, else (None, None, None). A tick every 2 minutes misses a wick between
+    two checks; the bars do not. A bar that reached both counts as the stop: the order inside a bar is
+    unknown, and the stop is the cautious answer (the Time Machine's rule too). Bars start the minute after
+    the fill's minute, so nothing from before the buy counts (that minute is left to the quote rules). Bars
+    from flat-by on are left to the flat-by exit. A stop fills at the stop (an SL-M), a target at the target
+    (a limit there would fill)."""
+    if trade.get("carried_from") or not trade.get("entry_time"):
+        return None, None, None
+    try:
+        stop = None if trade.get("stop") is None else float(trade["stop"])
+        target = None if trade.get("target") is None else float(trade["target"])
+        entered = datetime.datetime.strptime("%s %s" % (date, trade["entry_time"]), "%Y-%m-%d %H:%M")
+    except (TypeError, ValueError):
+        return None, None, None
+    try:
+        flat_t = parse_hhmm(trade.get("flat_by") or "15:10", "flat_by")
+    except AutopilotError:
+        flat_t = datetime.time(15, 10)   # exit_reason's fallback too
+    first = (entered + datetime.timedelta(minutes=1)).strftime("%Y-%m-%d %H:%M")
+    flat = "%s %s" % (date, flat_t.strftime("%H:%M"))
+    for b in sorted((b for b in bars if isinstance(b, dict)), key=lambda b: str(b.get("start"))):
+        start = str(b.get("start") or "")
+        if start[:10] != date or start < first or start >= flat:
+            continue
+        try:
+            hi, lo = float(b["high"]), float(b["low"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        if stop is not None and lo <= stop:
+            return "stop", stop, start[11:]
+        if target is not None and hi >= target:
+            return "target", target, start[11:]
+    return None, None, None
+
+
 def own_order(day):
     """Record that trader/orders.json, as it is now, was written for the autopilot."""
     doc = read_json(os.path.join(day.project, "trader", "orders.json")) or {}
@@ -949,10 +1050,16 @@ def auto_exits(day):
     if not open_syms:
         return
     quotes = quotes_for(day, open_syms)
+    bars = bars_for(day, [s for s in open_syms if not trades[s].get("carried_from")])
     clock = day.clock()
     for sym in open_syms:
         tr = trades[sym]
-        reason, price = exit_reason(tr, quotes.get(sym), clock)
+        reason, price, bar = bar_touch(tr, bars.get(sym) or [], day.date)
+        if reason:
+            tr["touch_bar"] = bar
+        else:
+            tr.pop("touch_bar", None)
+            reason, price = exit_reason(tr, quotes.get(sym), clock)
         if not reason:
             continue
         if price is None:
@@ -1020,14 +1127,17 @@ def closed(day, tr, price, reason, qty):
     entry = float(tr["entry_price"])
     gross = round((price - entry) * qty, 2)
     charges = charges_for(day.cfg, entry * qty, price * qty, day.skills)
-    tr.update(status="closed", exit_time=day.clock().strftime("%H:%M"), exit_price=round(price, 2),
+    booked = day.clock().strftime("%H:%M")
+    touched = tr.get("touch_bar") if reason in ("stop", "target") else None
+    tr.update(status="closed", exit_time=touched or booked, booked_at=booked, exit_price=round(price, 2),
               exit_reason=reason, closed_qty=qty, gross=gross, charges=charges,
               net=round(gross - charges, 2) if charges is not None else None)
     write_journal(day)
     loud = reason in ("auto square-off", "carried over")
+    touched = (", touched at %s, booked at %s" % (touched, booked)) if touched else ""
     day.note("auto-sell:" + sym, "AUTO-PAPER SELL %d %s at %.2f (%s%s). P&L %+.2f gross, %s net after estimated "
              "charges." % (qty, sym, price, reason, ": closed by the autopilot's 15:15 safety net" if
-                           reason == "auto square-off" else "", gross,
+                           reason == "auto square-off" else touched, gross,
                            ("%+.2f" % tr["net"]) if tr["net"] is not None else "?"), loud or True)
 
 
@@ -1109,6 +1219,128 @@ def release_ended_ticket(day):
                  % (active, ended[-1].get("status")))
 
 
+def pick_rule(s):
+    """The history scoring rule from the autopilot's own stop and target (or-mid and 2R by default).
+    Rules the history cannot replay (price:, atr:) are scored as or-mid, and the pick says so."""
+    stop = {"or-mid": ["--stop-rule", "or_mid"], "or-low": ["--stop-rule", "or_low"]}.get(s["stop"])
+    if stop is None and s["stop"].startswith("pct:"):
+        stop = ["--stop-rule", "pct", "--stop-pct", s["stop"][4:]]
+    target = (s["target"][:-1] if s["target"].endswith("R") else "2")
+    note = "" if stop and s["target"].endswith("R") else " (scored with or-mid and 2R: %s / %s cannot be replayed)" % (
+        s["stop"], s["target"])
+    return ((stop or ["--stop-rule", "or_mid"]) + ["--target-r", target, "--until", s["flat_by_t"].strftime("%H:%M")],
+            note)
+
+
+def morning_pick(day, s):
+    """Pick today's symbols before the open: the most volatile liquid stocks (trader-scanner volatile),
+    ranked by how the autopilot's own breakout rule did on each one's last ~60 sessions (trader-timemachine
+    history), minus any with results today (trader-news). Writes day.state["pick"]; True when done.
+    A failed step retries next tick until auto_pick.until; the config's symbols are the fallback."""
+    p = s["pick"]
+    runner = day.runner
+    old = getattr(runner, "timeout", None)
+    if old is not None:
+        runner.timeout = max(old, PICK_TIMEOUT)
+    try:
+        out = os.path.join("trader", "autopilot", "pick-volatile-%s.json" % day.date)
+        doc = read_json(os.path.join(day.project, out)) if day.state.get("pick_scanned") else None
+        code = 0
+        if not (doc or {}).get("hits"):    # a retry reuses this morning's scan; only a new day scans again
+            code, _ = day.run("trader-scanner/scan.py", "volatile", "--index", p["index"], "--top",
+                              str(p["candidates"]), "--out", out, "--quiet")
+            doc = read_json(os.path.join(day.project, out))
+            if (doc or {}).get("hits"):
+                day.state["pick_scanned"] = True
+                day.save()
+        hits = [h for h in (doc or {}).get("hits") or [] if isinstance(h, dict) and h.get("symbol")]
+        if not hits:
+            return False, "the volatile scan found nothing (exit %s)" % code
+        cands = []
+        for h in hits:
+            try:
+                cands.append(nse_symbol(h["symbol"]))
+            except AutopilotError:
+                continue
+        atr = {nse_symbol(h["symbol"]): h.get("atr_pct") for h in hits if h.get("symbol") in cands}
+        rule, rule_note = pick_rule(s)
+        code, hist = day.run_json("trader-timemachine/timemachine.py", "history", *(cands + rule + ["--json"]))
+        history = (hist or {}).get("history") or {}
+        if not history:
+            return False, "the history replay returned nothing (exit %s)" % code
+        code, news = day.run_json("trader-news/news.py", "--tickers", ",".join(cands), "--hours", "18",
+                                  "--json", "--dry-run", "--no-moves")
+        results_today = sorted({d.get("symbol") for d in (news or {}).get("results_due") or []
+                                if isinstance(d, dict) and d.get("date") == day.date})
+        news_note = "" if news is not None and code != 2 else " (the news check failed: results days not filtered)"
+    finally:
+        if old is not None:
+            runner.timeout = old
+    rows = []
+    for sym in cands:
+        h = history.get(sym)
+        if not isinstance(h, dict):
+            continue
+        avg, n = h.get("avg_R"), h.get("triggered") or 0
+        why = None
+        if sym in results_today:
+            why = "results today"
+        elif avg is None or n < p["min_trades"]:
+            why = "only %d past breakouts" % n
+        elif avg < p["min_avg_r"]:
+            why = "average R %+.3f under %+.2f" % (avg, p["min_avg_r"])
+        rows.append({"symbol": sym, "avg_R": avg, "trades": n, "target": h.get("target"), "stop": h.get("stop"),
+                     "atr_pct": round(atr[sym], 2) if isinstance(atr.get(sym), (int, float)) else None, "skip": why})
+    keep = sorted((r for r in rows if not r["skip"]), key=lambda r: (-r["avg_R"], -(r["atr_pct"] or 0)))
+    picked = [r["symbol"] for r in keep[:p["top"]]]
+    day.state["pick"] = {"at": day.clock().strftime("%H:%M"), "symbols": picked, "rows": rows,
+                         "rule": " ".join(rule), "index": p["index"]}
+    if picked:
+        day.note("pick", "Picked for today: %s.%s%s Skipped: %s." % (
+            ", ".join("%s (%+.2fR over %d%s)" % (r["symbol"], r["avg_R"], r["trades"],
+                                                 "" if r["atr_pct"] is None else ", ATR %s%%" % r["atr_pct"])
+                      for r in keep[:p["top"]]), rule_note, news_note,
+            ", ".join("%s (%s)" % (r["symbol"], r["skip"]) for r in rows if r["skip"])[:200] or "none"), True)
+    else:
+        day.note("pick", "No stock cleared the pick today (%d checked: %s).%s%s" % (
+            len(rows), ", ".join("%s %s" % (r["symbol"], r["skip"]) for r in rows)[:200], rule_note, news_note), True)
+    return True, None
+
+
+def todays_symbols(day, s, project, cfg, now, hol, t):
+    """(symbols, skipped notes): the morning pick when auto_pick is on, else the configured symbols."""
+    p = s["pick"]
+    if p is None:
+        syms, _, skipped = symbols(project, cfg, now.date(), hol)
+        return syms, skipped
+    pick = day.state.get("pick")
+    if pick is None and p["at_t"] <= t <= p["until_t"]:
+        try:
+            done, why = morning_pick(day, s)
+        except Exception as e:  # a crash in the pick never stops the tick: it retries, then falls back
+            done, why = False, "%s: %s" % (type(e).__name__, e)
+            day.log("  morning pick crashed: %s\n%s" % (e, traceback.format_exc()))
+        if not done:
+            day.note("pick-retry:" + hashlib.sha1(str(why).encode("utf-8")).hexdigest()[:8],
+                     "Morning pick failed (%s); it retries until %s." % (why, p["until"]))
+        pick = day.state.get("pick")
+    if pick is not None:
+        return list(pick.get("symbols") or []), []
+    if t <= p["until_t"]:
+        return [], []   # the pick has not run yet: nothing to watch until it does
+    day.state["pick"] = {"at": None, "symbols": [], "rows": [], "failed": True}
+    try:
+        syms, _, skipped = symbols(project, cfg, now.date(), hol)
+    except AutopilotError:
+        day.note("pick-none", "The morning pick did not run and no symbols are configured: nothing to watch today.",
+                 True)
+        return [], []
+    day.state["pick"]["symbols"] = list(syms)
+    day.note("pick-fallback", "The morning pick did not finish by %s: watching the configured symbols instead (%s)."
+             % (p["until"], ", ".join(syms)), True)
+    return syms, skipped
+
+
 def tick(project, now=None, runner=None, notifier=None, live_ok=False, test_now=None, skills=SKILLS):
     """One pass. Returns a short status string; raises AutopilotError on a refusal."""
     now = now or now_ist()
@@ -1132,13 +1364,19 @@ def tick(project, now=None, runner=None, notifier=None, live_ok=False, test_now=
         raise AutopilotError('"auto_paper" needs paper trading, and trader/config.json has "paper": false. '
                              "The autopilot never approves a live order, --live-ok or not.")
     runner = runner or SubprocessRunner(skills, auto_paper=auto)
-    syms, _, skipped = symbols(project, cfg, now.date(), hol)
+    if s["pick"] is None:
+        syms, _, skipped = symbols(project, cfg, now.date(), hol)
     day = Day(project, now, runner, notifier, test_now)
     day.auto_paper, day.cfg, day.skills = auto, cfg, skills
     day.state["paper"] = paper
     day.state["auto_paper"] = auto
     try:
         day.flush()
+        if s["pick"] is not None:
+            syms, skipped = todays_symbols(day, s, project, cfg, now, hol, t)
+            # an open trade is always watched, picked today or not
+            syms = syms + [k for k, v in sorted((day.state.get("trades") or {}).items())
+                           if v.get("status") in ("open", "entering", "exiting") and k not in syms]
         for msg in skipped + s["warnings"]:
             day.note("setting:" + hashlib.sha1(msg.encode("utf-8")).hexdigest()[:10], msg)
         if now.year not in years:
@@ -1146,7 +1384,8 @@ def tick(project, now=None, runner=None, notifier=None, live_ok=False, test_now=
                      "a trading day. Add NSE_HOLIDAYS for %d to trader-scanner/scan.py."
                      % (", ".join(str(y) for y in years), now.year, now.year))
 
-        if not day.state["news"] and s["news_at_t"] <= t < OPEN:
+        news_until = max(OPEN, s["entry_from_t"]) if s["pick"] else OPEN   # a late pick still gets its news
+        if not day.state["news"] and syms and s["news_at_t"] <= t < news_until:
             args = ["--tickers", ",".join(syms), "--hours", "18"] + (["--dry-run"] if test_now else [])
             code, out = day.run("trader-news/news.py", *args)
             if code in (0, 1):
@@ -1309,6 +1548,10 @@ def status(project, now=None, check=False):
     if st:
         lines.append("  done: %s" % (", ".join("%s %s" % kv for kv in sorted(st.get("done", {}).items())) or "none"))
         lines.append("  prepared: %s, alerts on: %s" % (st.get("active") or "none", "yes" if st.get("alerts") else "no"))
+        pick = st.get("pick")
+        if isinstance(pick, dict):
+            lines.append("  picked%s: %s" % ((" at %s" % pick["at"]) if pick.get("at") else "",
+                                             ", ".join(pick.get("symbols") or []) or "none"))
         lines += ["  " + n for n in st.get("notes", [])] or ["  no notes yet today"]
         lines += journal_lines(read_json(os.path.join(project, "trader", "autopilot", "journal-%s.json" % date)))
     else:

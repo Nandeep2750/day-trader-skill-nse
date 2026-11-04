@@ -23,6 +23,11 @@ work around the one moment that matters, your yes:
   stop      step 2 of a bracket: after the entry fills, the protective SL-M
             stop for the filled qty. Prints the exact call, then records the
             stop's broker order id (--status placed --broker-id ID).
+  target    step 3 of a bracket in "resting" mode: after the stop is placed,
+            a resting LIMIT sell at the target for the filled qty.
+  cancelled records that an open stop or target was cancelled (or that the
+            cancel failed because it executed), e.g. the other leg after one
+            leg filled.
   fill      records a fill in trader/portfolio.json (cash and shares).
   flatten   builds a sell ticket that closes a symbol's open position by
             flat_by: cancel every open stop, then a MARKET SELL. It still goes
@@ -36,14 +41,26 @@ work around the one moment that matters, your yes:
     python3 ticket.py result --index 1 --status paper            # paper mode: simulated fill
     python3 ticket.py stop --index 1                              # the stop call for the filled qty
     python3 ticket.py stop --index 1 --status placed --broker-id 2511030002
-    python3 ticket.py fill --symbol RELIANCE --side sell --qty 20 --price 1245.00
+    python3 ticket.py target --index 1                            # step 3 (resting mode): the target call
+    python3 ticket.py target --index 1 --status placed --broker-id 2511030003
+    python3 ticket.py fill --symbol RELIANCE --side sell --qty 20 --price 1245.00 --target-hit
+    python3 ticket.py cancelled --symbol RELIANCE --broker-id 2511030002
     python3 ticket.py flatten --symbol RELIANCE --qty 20
     python3 ticket.py log
 
-Why the target is not a resting order: neither Kite nor Angel One offers a
-bracket for NSE equity intraday any more. A resting target sell next to a
-resting stop sell could both fill and leave you short. So the stop rests at
-the exchange and trader-alerts watches the target; at the target you flatten.
+The target ("target_order" in trader/config.json; the default depends on the broker):
+  robo     Angel One only, the default there: entry, target and stop go as ONE
+           Robo bracket (variety ROBO, product BO, a LIMIT entry). Angel One
+           cancels the other leg itself when one fills, so it cannot leave you
+           short. Robo is intraday only and Angel refuses it on low-volume stocks.
+  resting  the Zerodha default: the SL-M stop after the fill, then a resting
+           LIMIT sell at the target. Neither broker links the two for intraday,
+           so when one fills the other must be cancelled at once (trader-alerts
+           rings, then ticket.py fill --stop-hit / --target-hit prints the
+           cancel). If both fill before the cancel, you are short: get_positions
+           shows a negative quantity; buy it back at once.
+  watched  the old way: only the stop rests; trader-alerts watches the target
+           and you flatten when it rings. A wick between two checks is missed.
 
 Paper mode ("paper": true, the default): neither broker has a paper account,
 so in paper mode Claude calls no broker tool at all. The fills are simulated
@@ -80,6 +97,13 @@ FRESH_PASS = datetime.timedelta(minutes=5)
 TARGET_WHY = ("The target is not sent as an order: Kite and Angel One have no bracket for NSE equity "
               "intraday, and a resting target next to a resting stop could both fill and leave you short. "
               "trader-alerts watches the target; when it rings, flatten.")
+TARGET_MODES = ("robo", "resting", "watched")
+ROBO_WHY = ("Robo bracket: Angel One holds the target and the stop as one order and cancels the other leg "
+            "when one fills, so they can never both fill. Robo needs a LIMIT entry: if the price has run "
+            "past it, the entry does not fill.")
+RESTING_WHY = ("The target rests as a LIMIT order next to the SL-M stop. The broker does not link them: when "
+               "one fills, cancel the other at once (ticket.py fill --target-hit or --stop-hit prints the "
+               "cancel). If both fill first you are short: check get_positions and buy back a negative quantity.")
 AUTO_REPLY = "auto-paper (delegated by the user in config; no human yes)"
 CANCEL_FAILS = ("If any cancel fails because the stop already executed, do NOT send the sell; "
                 "check get_positions. If it fails because the stop was already cancelled, the stop is gone: "
@@ -249,6 +273,8 @@ def fingerprint(order, cfg=None):
     payload["product_resolved"] = str(order.get("product") or c.get("product") or "MIS").strip().upper()
     payload["broker"] = str(c.get("broker") or "zerodha").strip().lower()
     payload["paper"] = c.get("paper", True) is not False
+    if str(c.get("target_order") or "").strip():
+        payload["target_order"] = str(c["target_order"]).strip().lower()
     blob = json.dumps(payload, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(blob.encode("utf-8")).hexdigest()
 
@@ -315,7 +341,26 @@ def canonical(order, cfg=None):
     for k in ("limit_price", "stop_loss_stop_price", "take_profit_limit_price"):
         if order.get(k) is not None and not (_f(order.get(k)) or 0) > 0:
             raise TicketError("%s: %s %r is not a price" % (what, k, order.get(k)))
+    w["target_mode"] = target_mode(cfg, w)
     return w
+
+
+def target_mode(cfg, w):
+    """How a bracket's target goes to the broker: robo, resting or watched (see the top of this file).
+    Only a bracket with both a stop and a target has a target leg; everything else is "watched"."""
+    if not (has_stop(w) and w.get("take_profit_limit_price") is not None):
+        return "watched"
+    cfg = cfg or {}
+    broker = broker_of(cfg)
+    raw = str(cfg.get("target_order") or "").strip().lower()
+    mode = raw or ("robo" if broker == "angelone" else "resting")
+    if mode not in TARGET_MODES:
+        raise TicketError("target_order %r is not robo, resting or watched" % cfg.get("target_order"))
+    if mode == "robo" and broker != "angelone":
+        raise TicketError("target_order \"robo\" is an Angel One bracket; Zerodha has none: use \"resting\"")
+    if mode == "robo" and w["product"] != "MIS":
+        mode = "resting"   # Robo is intraday only
+    return mode
 
 
 def inr(v):
@@ -406,11 +451,21 @@ def plain_parts(w):
     if is_bracket(w):
         how = "limit %s" % _p(w["limit_price"]) if w["type"] == "limit" else "market"
         parts = ["%s %s %s on NSE, %s, %s, %s" % (side, _str_num(w.get("qty")), w["symbol"], how, prod, tif)]
-        if w.get("stop_loss_stop_price") is not None:
-            parts.append("stop-loss %s (SL-M, placed after the entry fills)" % _p(w["stop_loss_stop_price"]))
-        if w.get("take_profit_limit_price") is not None:
-            parts.append("target %s (watched by trader-alerts, not a resting order)"
-                         % _p(w["take_profit_limit_price"]))
+        mode = w.get("target_mode", "watched")
+        if mode == "robo":
+            entry = robo_entry_price(w)
+            parts[0] = "%s %s %s on NSE, Angel One Robo bracket, LIMIT entry %s, intraday, %s" % (
+                side, _str_num(w.get("qty")), w["symbol"], _p(entry) if entry else "(no price)", tif)
+            parts.append("stop-loss %s and target %s in the same Robo order: Angel cancels the other leg when "
+                         "one fills" % (_p(w["stop_loss_stop_price"]), _p(w["take_profit_limit_price"])))
+        else:
+            if w.get("stop_loss_stop_price") is not None:
+                parts.append("stop-loss %s (SL-M, placed after the entry fills)" % _p(w["stop_loss_stop_price"]))
+            if w.get("take_profit_limit_price") is not None:
+                parts.append(("target %s (a resting LIMIT order, placed after the stop; when one fills, cancel "
+                              "the other)" if mode == "resting" else
+                              "target %s (watched by trader-alerts, not a resting order)")
+                             % _p(w["take_profit_limit_price"]))
         loss, stop = loss_at_stop(w)
         if loss is not None:
             parts.append("loss about %s if the stop fills at %s (it can fill worse in a fast market)"
@@ -443,16 +498,96 @@ def cancel_ids(order):
     return [str(i).strip() for i in ids if str(i).strip()]
 
 
+def robo_entry_price(w):
+    """A Robo bracket needs a LIMIT entry: the order's limit price, else the plan's entry."""
+    return _f(w["limit_price"]) if w["type"] == "limit" else _f((w.get("plan") or {}).get("entry"))
+
+
+ROBO_FRESH = datetime.timedelta(minutes=15)   # trader-risk's FRESH_MINUTES for a plan's entry
+
+
+def plan_time(plan):
+    """When a plan's entry price is from, as naive UTC: the older of created_at and date + entry_time (IST).
+    The same rule as trader-risk/check.py; None when the plan says neither."""
+    times = [parse_utc(plan.get("created_at"))]
+    m = re.match(r"^\s*(\d{1,2}):(\d{2})\s*([AaPp][Mm])?\s*$", str(plan.get("entry_time") or ""))
+    if m and re.match(r"^\d{4}-\d{2}-\d{2}$", str(plan.get("date") or "")):
+        h, mi = int(m.group(1)), int(m.group(2))
+        if m.group(3):
+            h = h % 12 + (12 if m.group(3).lower() == "pm" else 0)
+        if h <= 23 and mi <= 59:
+            times.append(ist_to_utc(datetime.datetime.strptime(plan["date"], "%Y-%m-%d").replace(hour=h, minute=mi)))
+    times = [t for t in times if t]
+    return min(times) if times else None
+
+
+def robo_problem(w, now):
+    """Why this order cannot go as a Robo bracket, or None. A market order is sent at the plan's entry, so
+    that entry must be fresh (what trader-risk measured the risk from); the target must sit beyond the
+    entry and the stop behind it, or Angel's distances would point the wrong way."""
+    if w.get("target_mode") != "robo":
+        return None
+    entry = robo_entry_price(w)
+    if not entry:
+        return "a Robo bracket needs a LIMIT entry and this order has no limit price or plan entry"
+    if w["type"] != "limit":
+        pt = plan_time(w.get("plan") or {})
+        if pt is None or not -60 <= (now - pt).total_seconds() <= ROBO_FRESH.total_seconds():
+            return ("a Robo bracket goes in as a LIMIT at the plan's entry %s, and that entry is %s: re-run the "
+                    "plan (trader-exit, trader-budget, trader-risk) or use a limit order"
+                    % (_p(entry), "undated" if pt is None else "older than 15 minutes"))
+    target, stop = _f(w["take_profit_limit_price"]), _f(w["stop_loss_stop_price"])
+    ok = stop < entry < target if w["side"] == "buy" else target < entry < stop
+    if not ok:
+        return ("a Robo bracket needs the %s: entry %s, stop %s, target %s" % (
+            "stop below the entry and the target above it" if w["side"] == "buy" else
+            "stop above the entry and the target below it", _p(entry), _p(stop), _p(target)))
+    return None
+
+
+def cancel_kind(w, oid):
+    """stop, target or robo: what a cancel id on a flatten ticket is (older tickets: a stop)."""
+    cs = w.get("cancel_stop") or {}
+    if str(oid) in [str(x) for x in (cs.get("robo_ids") or [])]:
+        return "robo"
+    if str(oid) in [str(x) for x in (cs.get("target_ids") or [])]:
+        return "target"
+    return "stop"
+
+
+def cancel_call(broker, kind, oid):
+    """(tool, arguments) that cancels one open leg."""
+    if broker == "angelone":
+        return ("cancel_order", {"variety": {"robo": "ROBO", "target": "NORMAL"}.get(kind, "STOPLOSS"),
+                                 "orderid": str(oid)})
+    return ("cancel_order", {"variety": "regular", "order_id": str(oid)})
+
+
 def entry_calls(w, broker, fp):
-    """[(tool, arguments)] for step 1: every stop cancel (a flatten), then the order itself."""
+    """[(tool, arguments)] for step 1: every leg cancel (a flatten), then the order itself."""
     sym = w["symbol"]
     side = w["side"].upper()
     qty = int(float(w["qty"]))
     limit = w["type"] == "limit"
-    calls = []
+    calls = [cancel_call(broker, cancel_kind(w, oid), oid) for oid in cancel_ids(w)]
+    if broker == "angelone" and w.get("target_mode") == "robo":
+        entry = robo_entry_price(w)
+        if not entry:
+            raise TicketError("a Robo bracket needs a LIMIT entry and %s has no limit price or plan entry" % sym)
+        tp, sl = _f(w["take_profit_limit_price"]), _f(w["stop_loss_stop_price"])
+        if not (sl < entry < tp if w["side"] == "buy" else tp < entry < sl):
+            raise TicketError("a Robo bracket needs the target beyond the entry and the stop behind it "
+                              "(entry %s, stop %s, target %s)" % (_p(entry), _p(sl), _p(tp)))
+        calls.append(("search_scrip", {"exchange": "NSE", "searchscrip": sym}))
+        calls.append(("place_order", {
+            "variety": "ROBO", "tradingsymbol": sym + "-EQ",
+            "symboltoken": "<from search_scrip: the row whose tradingsymbol is exactly %s-EQ>" % sym,
+            "transactiontype": side, "exchange": "NSE", "ordertype": "LIMIT", "producttype": "BO",
+            "duration": "DAY", "quantity": str(qty), "price": _p(entry),
+            "squareoff": _p(abs(_f(w["take_profit_limit_price"]) - entry)),
+            "stoploss": _p(abs(entry - _f(w["stop_loss_stop_price"])))}))
+        return calls
     if broker == "angelone":
-        for oid in cancel_ids(w):
-            calls.append(("cancel_order", {"variety": "STOPLOSS", "orderid": oid}))
         calls.append(("search_scrip", {"exchange": "NSE", "searchscrip": sym}))
         args = {"variety": "NORMAL", "tradingsymbol": sym + "-EQ",
                 "symboltoken": "<from search_scrip: the row whose tradingsymbol is exactly %s-EQ>" % sym,
@@ -461,8 +596,6 @@ def entry_calls(w, broker, fp):
                 "price": _p(w["limit_price"]) if limit else "0"}
         calls.append(("place_order", args))
         return calls
-    for oid in cancel_ids(w):
-        calls.append(("cancel_order", {"variety": "regular", "order_id": oid}))
     args = {"variety": "regular", "exchange": "NSE", "tradingsymbol": sym, "transaction_type": side,
             "quantity": qty, "product": w["product"], "order_type": "LIMIT" if limit else "MARKET",
             "validity": "DAY", "tag": "dts" + fp[:8]}
@@ -490,6 +623,26 @@ def stop_call(w, broker, qty, fp):
                             "transaction_type": side, "quantity": qty, "product": w["product"],
                             "order_type": "SL-M", "trigger_price": _paise(stop), "validity": "DAY",
                             "tag": "dts" + fp[:8] + "sl"})
+
+
+def target_call(w, broker, qty, fp):
+    """(tool, arguments) for step 3 in resting mode: a LIMIT order at the target for the filled qty."""
+    if w.get("take_profit_limit_price") is None:
+        raise TicketError("this order has no take_profit_limit_price")
+    sym = w["symbol"]
+    side = opposite(w["side"])
+    qty = int(float(qty))
+    target = w["take_profit_limit_price"]
+    if broker == "angelone":
+        return ("place_order", {"variety": "NORMAL", "tradingsymbol": sym + "-EQ",
+                                "symboltoken": "<the same symboltoken as the entry>",
+                                "transactiontype": side, "exchange": "NSE", "ordertype": "LIMIT",
+                                "producttype": ANGEL_PRODUCT[w["product"]], "duration": "DAY",
+                                "quantity": str(qty), "price": _p(target)})
+    return ("place_order", {"variety": "regular", "exchange": "NSE", "tradingsymbol": sym,
+                            "transaction_type": side, "quantity": qty, "product": w["product"],
+                            "order_type": "LIMIT", "price": _paise(target), "validity": "DAY",
+                            "tag": "dts" + fp[:8] + "tg"})
 
 
 def modify_stop_call(w, broker, order_id, qty):
@@ -616,6 +769,12 @@ def config_matches(rec, cfg):
     return bool(rec.get("paper")) == is_paper(cfg) and rec.get("broker") == broker_of(cfg)
 
 
+def mine(recs, fp=None, paper=None):
+    """Only the legs of one order (fingerprint) and of one mode (paper or live), when asked."""
+    return [r for r in recs if (fp is None or r.get("fingerprint") == fp)
+            and (paper is None or bool(r.get("paper")) == bool(paper))]
+
+
 def open_stops(state, symbol, today):
     """Today's protective stops for a symbol that are still open: placed, minus cancelled or filled."""
     live, gone = [], set()
@@ -627,6 +786,40 @@ def open_stops(state, symbol, today):
         elif rec.get("status") in ("stop_cancelled", "stop_filled"):
             gone.add(rec.get("broker_order_id"))
     return [r for r in live if r.get("broker_order_id") not in gone]
+
+
+def open_legs(state, symbol, today, kind):
+    """Today's open target or robo legs for a symbol: placed, minus cancelled or filled (as open_stops)."""
+    live, gone = [], set()
+    for rec in state.get("orders", []):
+        if rec_day(rec) != today or str(rec.get("symbol", "")).upper() != symbol:
+            continue
+        if rec.get("status") == kind + "_placed":
+            live.append(rec)
+        elif rec.get("status") in (kind + "_cancelled", kind + "_filled"):
+            gone.add(rec.get("broker_order_id"))
+    return [r for r in live if r.get("broker_order_id") not in gone]
+
+
+def leg_record(now, today, idx, w, fp, qty, kind, status, broker_id=None, paper=False, note=None):
+    """A target or robo leg record (stops use stop_record)."""
+    price = _f(w.get("take_profit_limit_price"))
+    what = ("resting target: LIMIT %s %s %s at %s" % (opposite(w["side"]), _str_num(float(qty)), w["symbol"], _p(price))
+            if kind == "target" else
+            "Robo bracket %s %s %s: target %s, stop %s" % (w["side"].upper(), _str_num(float(qty)), w["symbol"],
+                                                           _p(price), _p(w.get("stop_loss_stop_price"))))
+    rec = {"at": ist_iso(now), "date": today, "index": idx, "fingerprint": fp, "symbol": w["symbol"],
+           "qty": _str_num(float(qty)), "target": price, "stop": _f(w.get("stop_loss_stop_price")),
+           "status": "%s_%s" % (kind, status), "plain": what + (" (paper)" if paper else "")}
+    if paper and not broker_id:
+        broker_id = "paper-%s-%s" % (kind, fp[:8])
+    if broker_id:
+        rec["broker_order_id"] = str(broker_id)
+    if paper:
+        rec["paper"] = True
+    if note:
+        rec["note"] = note
+    return rec
 
 
 def risk_verdict(risk, fp, today):
@@ -725,6 +918,9 @@ def status_of(w, fp, cfg, risk, state, today, now):
     stale = stale_why(w, rv, cfg, now)
     if stale:
         return False, False, stale, rv
+    robo = None if is_paper(cfg) else robo_problem(w, now)
+    if robo:
+        return False, False, "NOT READY: " + robo, rv
     return True, False, "READY: trader-risk PASS, waiting for your yes", rv
 
 
@@ -754,13 +950,17 @@ def render(order, idx, total, cfg, risk, state, today, now):
     lines.append("  " + label)
     for warn in (rv or {}).get("warnings", []):
         lines.append("  note: " + warn)
+    mode = w.get("target_mode", "watched")
     if paper:
         lines.append("  PAPER: Claude calls no broker tool. After your yes the fill is simulated here")
         lines.append("  (ticket.py result --index %d --status paper)%s." % (
-            idx, ", and so is the stop" if has_stop(w) else ""))
+            idx, "" if not has_stop(w) else ", and so are the stop and the target" if mode != "watched"
+            else ", and so is the stop"))
         if ref_price(w) is None:
             lines.append("  It has no price of its own: pass --filled-price P (the live price), or keep")
             lines.append("  trader/prices.json fresh (under 15 minutes old).")
+    elif (ready or approved) and robo_problem(w, now):
+        lines.append("  No broker call: " + robo_problem(w, now) + ".")
     elif ready or approved:
         lines.append("  Step 1, after your yes, Claude calls the %s tools, in order:" % BROKERS[broker])
         lines.extend(call_lines(entry_calls(w, broker, fp)))
@@ -768,17 +968,25 @@ def render(order, idx, total, cfg, risk, state, today, now):
             lines.append("  Use the symboltoken only if search_scrip returns a row whose tradingsymbol is")
             lines.append("  exactly %s-EQ. No exact match: stop and tell the user. Never pass force: true." % w["symbol"])
         if cancel_ids(w):
-            lines.append("  The cancels go first: an open stop would otherwise sell these shares a second time.")
+            lines.append("  The cancels go first: an open stop or target would otherwise sell these shares a second time.")
+            if any(cancel_kind(w, i) == "robo" for i in cancel_ids(w)):
+                lines.append("  After cancelling a Robo bracket, call get_positions: Angel may already have closed the")
+                lines.append("  position. Send the sell only for the quantity still held; if none, record --status failed.")
             lines.append("  " + CANCEL_FAILS)
-        if has_stop(w):
+        if has_stop(w) and mode != "robo":
             tool, args = stop_call(w, broker, w["qty"], fp)
             lines.append("  Step 2, only after the entry fills: the protective stop for the filled qty")
             lines.append("  (ticket.py stop --index %d prints it with the real filled qty):" % idx)
             lines.extend(call_lines([(tool, args)]))
+        if mode == "resting":
+            tool, args = target_call(w, broker, w["qty"], fp)
+            lines.append("  Step 3, only after the stop is placed: the resting target for the filled qty")
+            lines.append("  (ticket.py target --index %d prints it with the real filled qty):" % idx)
+            lines.extend(call_lines([(tool, args)]))
     else:
         lines.append("  No broker call: this ticket is not ready.")
     if has_stop(w) and w.get("take_profit_limit_price") is not None:
-        lines.append("  " + TARGET_WHY)
+        lines.append("  " + {"robo": ROBO_WHY, "resting": RESTING_WHY}.get(mode, TARGET_WHY))
     if ready:
         lines.append("  Reply \"yes\" to place this one order, or \"no\" to skip it.")
         if not paper:
@@ -795,14 +1003,18 @@ def ticket_json(order, idx, cfg, risk, state, today, now):
         loss = _f(rv["max_loss"])
     broker = broker_of(cfg)
     paper = is_paper(cfg)
-    live = not paper and (ready or approved)
+    live = not paper and (ready or approved) and not robo_problem(w, now)
     out = {"index": idx, "ready": ready, "approved": approved, "status": label, "plain": plain(w),
            "fingerprint": fp, "paper": paper, "broker": broker,
            "why": w.get("why", ""), "bracket": is_bracket(w), "max_loss": loss, "stop": stop,
            "calls": [{"tool": t, "input": a} for t, a in entry_calls(w, broker, fp)] if live else []}
-    if live and has_stop(w):
+    out["target_mode"] = w.get("target_mode", "watched")
+    if live and has_stop(w) and out["target_mode"] != "robo":
         t, a = stop_call(w, broker, w["qty"], fp)
         out["stop_call"] = {"tool": t, "input": a, "after": "the entry fills; quantity = the filled qty"}
+    if live and out["target_mode"] == "resting":
+        t, a = target_call(w, broker, w["qty"], fp)
+        out["target_call"] = {"tool": t, "input": a, "after": "the stop is placed; quantity = the filled qty"}
     return out
 
 
@@ -1065,29 +1277,32 @@ def record_cancels(a, state, w, now, today):
             raise TicketError("stop %s is not on this ticket (it cancels %s)" % (oid, ", ".join(ids) or "nothing"))
     executed = False
     for oid in a.cancelled or []:
+        k = cancel_kind(w, oid)
         state["orders"].append({"at": ist_iso(now), "date": today, "index": a.index, "symbol": w["symbol"],
-                                "status": "stop_cancelled", "broker_order_id": oid,
-                                "plain": "protective stop %s cancelled" % oid})
-        print("Recorded: stop %s cancelled." % oid)
+                                "status": k + "_cancelled", "broker_order_id": oid,
+                                "plain": "%s %s cancelled" % (LEG_WORDS[k], oid)})
+        print("Recorded: %s %s cancelled." % (LEG_WORDS[k], oid))
     for oid in a.cancel_failed or []:
+        k = cancel_kind(w, oid)
         if reason == "already-cancelled":
             state["orders"].append({"at": ist_iso(now), "date": today, "index": a.index, "symbol": w["symbol"],
-                                    "status": "stop_cancelled", "broker_order_id": oid,
+                                    "status": k + "_cancelled", "broker_order_id": oid,
                                     "note": "cancel failed: already cancelled",
-                                    "plain": "protective stop %s was already cancelled" % oid})
-            print("Recorded: stop %s was already cancelled. It is gone: the sell can go." % oid)
+                                    "plain": "%s %s was already cancelled" % (LEG_WORDS[k], oid)})
+            print("Recorded: %s %s was already cancelled. It is gone: the sell can go." % (LEG_WORDS[k], oid))
         else:
             executed = True
             state["orders"].append({"at": ist_iso(now), "date": today, "index": a.index, "symbol": w["symbol"],
-                                    "status": "stop_filled", "broker_order_id": oid,
-                                    "note": "cancel failed: the stop executed",
-                                    "plain": "protective stop %s executed" % oid})
-            print("Recorded: stop %s EXECUTED. Do NOT send the sell; check get_positions, then record the "
-                  "stop's fill with ticket.py fill --side sell." % oid)
+                                    "status": k + "_filled", "broker_order_id": oid,
+                                    "note": "cancel failed: it executed",
+                                    "plain": "%s %s executed" % (LEG_WORDS[k], oid)})
+            print("Recorded: %s %s EXECUTED. Do NOT send the sell; check get_positions, then record the "
+                  "fill with ticket.py fill --side sell." % (LEG_WORDS[k], oid))
     write_json(a.state, state)
     return 1 if executed else 0
 
 
+LEG_WORDS = {"stop": "protective stop", "target": "resting target", "robo": "Robo bracket"}
 PRICE_FRESH = datetime.timedelta(minutes=15)
 
 
@@ -1118,11 +1333,17 @@ def no_stop_warning(a, cfg, w, fp, now, today):
         return 0
     state = load_state(a.state)
     recs = state.get("orders", [])
-    gone = [i for i in cancel_ids(w) if any(r.get("status") == "stop_cancelled" and r.get("broker_order_id") == i
-                                            and rec_day(r) == today for r in recs)]
-    if not gone or open_stops(state, w["symbol"], today):
+    gone = [i for i in cancel_ids(w) if any(r.get("status") in ("stop_cancelled", "robo_cancelled")
+                                            and r.get("broker_order_id") == i and rec_day(r) == today for r in recs)]
+    if not gone or open_stops(state, w["symbol"], today) or open_legs(state, w["symbol"], today, "robo"):
         return 0
+    if any(cancel_kind(w, i) == "robo" for i in gone):
+        print("Check get_positions first: cancelling a Robo bracket may already have closed the position at Angel. "
+              "If shares are still held, they have NO stop now.")
     trigger = None
+    for r in recs:
+        if r.get("status") == "robo_placed" and r.get("broker_order_id") in gone and _f(r.get("stop")):
+            trigger = _f(r["stop"])
     for r in recs:
         if r.get("status") == "stop_placed" and r.get("broker_order_id") in gone and _f(r.get("stop")):
             trigger = _f(r["stop"])
@@ -1155,7 +1376,8 @@ def cmd_result(a):
     if a.restop_id:   # after a failed flatten: no open yes is needed to record a stop
         trigger = None
         for r in state.get("orders", []):
-            if r.get("status") == "stop_placed" and r.get("symbol") == w["symbol"] and _f(r.get("stop")):
+            if r.get("status") in ("stop_placed", "robo_placed") and r.get("symbol") == w["symbol"] \
+                    and _f(r.get("stop")):
                 trigger = _f(r["stop"])
         if trigger is None:
             raise TicketError("no stop price recorded for %s: record the re-placed stop by hand" % w["symbol"])
@@ -1179,10 +1401,11 @@ def cmd_result(a):
             raise TicketError("a stop executed: do NOT record or send the sell")
     if a.status in ("placed", "paper"):
         gone = {r.get("broker_order_id") for r in state.get("orders", [])
-                if r.get("status") == "stop_filled" and rec_day(r) == today and r.get("symbol") == w["symbol"]}
+                if r.get("status") in ("stop_filled", "target_filled", "robo_filled") and rec_day(r) == today
+                and r.get("symbol") == w["symbol"]}
         hit = [i for i in cancel_ids(w) if i in gone]
         if hit:
-            raise TicketError("stop %s executed: the sell should not have been sent; check get_positions"
+            raise TicketError("%s executed: the sell should not have been sent; check get_positions"
                               % ", ".join(hit))
     if a.status == "paper" and not paper:
         raise TicketError("--status paper is for paper mode only; the config says \"paper\": false")
@@ -1215,16 +1438,26 @@ def cmd_result(a):
         new["note"] = a.note
     adds = [new]
     if placed:
-        still = {s.get("broker_order_id") for s in open_stops(state, w["symbol"], today)}
+        still = {s.get("broker_order_id") for s in open_stops(state, w["symbol"], today)
+                 + open_legs(state, w["symbol"], today, "target") + open_legs(state, w["symbol"], today, "robo")}
         for oid in [i for i in cancel_ids(w) if i in still]:
+            k = cancel_kind(w, oid)
             adds.append({"at": ist_iso(now), "date": today, "index": a.index, "symbol": w["symbol"],
-                         "status": "stop_cancelled", "broker_order_id": oid,
-                         "plain": "protective stop %s cancelled for the flatten" % oid})
+                         "status": k + "_cancelled", "broker_order_id": oid,
+                         "plain": "%s %s cancelled for the flatten" % (LEG_WORDS[k], oid)})
         if pf is not None:
             adds.append(fill_record(now, today, w["symbol"], w["side"], filled_qty, filled_price, paper=paper))
         bracket = rec.get("kind") == "entry" and has_stop(w)
-        if a.status == "paper" and bracket:
+        mode = w.get("target_mode", "watched")
+        if bracket and mode == "robo":
+            if a.status == "placed" and not a.broker_id:
+                raise TicketError("--status placed needs --broker-id for a Robo bracket (flatten cancels it by that id)")
+            adds.append(leg_record(now, today, a.index, w, fp, filled_qty or w["qty"], "robo", "placed",
+                                   broker_id=a.broker_id, paper=a.status == "paper"))
+        elif a.status == "paper" and bracket:
             adds.append(stop_record(now, today, a.index, w, fp, filled_qty, "stop_placed", paper=True))
+            if mode == "resting":
+                adds.append(leg_record(now, today, a.index, w, fp, filled_qty, "target", "placed", paper=True))
     state.setdefault("orders", []).extend(adds)
     write_json(a.state, state)
     if pf is not None:
@@ -1236,18 +1469,26 @@ def cmd_result(a):
         print("Added the fill (%s %s at %s) to %s." % (_str_num(float(filled_qty)), w["symbol"],
                                                        _p(filled_price), a.portfolio))
     bracket = rec.get("kind") == "entry" and has_stop(w)
+    mode = w.get("target_mode", "watched")
     if a.status == "paper":
         if bracket:
-            print("Simulated protective stop at %s. trader-alerts watches the stop, the target and flat_by."
-                  % _p(w["stop_loss_stop_price"]))
+            print("Simulated protective stop at %s%s. trader-alerts watches the stop, the target and flat_by."
+                  % (_p(w["stop_loss_stop_price"]), "" if mode == "watched" else
+                     " and target at %s" % _p(w["take_profit_limit_price"])))
         return 0
     if pf is None:
         print("When it fills, record it: ticket.py fill --symbol %s --side %s --qty Q --price P"
               % (w["symbol"], w["side"]))
+    if bracket and mode == "robo":
+        print("The Robo bracket holds the stop and the target: no step 2 or 3. Check get_orders that both legs")
+        print("are open. When trader-alerts rings, record the fill with ticket.py fill ... --stop-hit or --target-hit.")
+        return 0
     if bracket:
         print("Next, right after the entry fills: the protective stop. ticket.py stop --index %d%s"
               % (a.index, "" if filled_qty else " --filled-qty Q"))
         print("Until the stop is placed the position has NO stop at the exchange.")
+        if mode == "resting":
+            print("Then step 3, the resting target: ticket.py target --index %d" % a.index)
     return 0
 
 
@@ -1257,6 +1498,9 @@ def cmd_stop(a):
     w = canonical(order, cfg)
     if not has_stop(w):
         raise TicketError("order %d has no stop-loss" % a.index)
+    if w.get("target_mode") == "robo":
+        raise TicketError("order %d is a Robo bracket: its stop is part of that one order; do not place another"
+                          % a.index)
     fp = fingerprint(order, cfg)
     placed = latest(state, fp, today, ENTRY_STATUSES)
     if not placed or placed.get("status") != "placed":
@@ -1274,7 +1518,7 @@ def cmd_stop(a):
         raise TicketError("filled qty %s is more than the order's %s" % (_str_num(float(qty)), w["qty"]))
     paper = is_paper(cfg)
     broker = broker_of(cfg)
-    already = open_stops(state, w["symbol"], today)
+    already = mine(open_stops(state, w["symbol"], today), paper=paper)
     if paper:
         if already:
             print("Paper: the simulated stop for %s is already recorded." % w["symbol"])
@@ -1314,6 +1558,121 @@ def cmd_stop(a):
     return 1
 
 
+def cmd_target(a):
+    """Step 3 in resting mode: the LIMIT target for the filled qty, after the stop is open."""
+    orders, cfg, risk, state, today, now = _load(a)
+    order = _pick(orders, a.index)
+    w = canonical(order, cfg)
+    mode = w.get("target_mode", "watched")
+    if mode != "resting":
+        raise TicketError("order %d's target is %s, not a resting order%s" % (
+            a.index, mode, ": Angel holds it in the Robo bracket" if mode == "robo" else
+            " (set \"target_order\": \"resting\" to rest it)"))
+    fp = fingerprint(order, cfg)
+    placed = latest(state, fp, today, ENTRY_STATUSES)
+    if not placed or placed.get("status") != "placed":
+        raise TicketError("order %d's entry is not recorded as placed today; the target comes after the fill" % a.index)
+    if not config_matches(placed, cfg):
+        raise TicketError("config changed since your yes: re-check and re-approve")
+    qty = a.filled_qty or placed.get("filled_qty")
+    if not qty or not _f(qty) or _f(qty) <= 0 or _f(qty) != int(_f(qty)):
+        raise TicketError("say how many shares filled: --filled-qty Q (from get_orders / the order book)")
+    if _f(qty) > _f(w["qty"]) + 1e-9:
+        raise TicketError("filled qty %s is more than the order's %s" % (_str_num(float(qty)), w["qty"]))
+    broker = broker_of(cfg)
+    paper = is_paper(cfg)
+    done = [r for r in state.get("orders", []) if rec_day(r) == today and r.get("fingerprint") == fp
+            and r.get("status") in ("target_placed", "target_filled", "target_cancelled")]
+    if done or open_legs(state, w["symbol"], today, "target"):
+        print("A target for %s was already placed today (%s). Do NOT place another one: two targets would sell"
+              % (w["symbol"], ", ".join(sorted({str(r.get("status")) for r in done})) or "target_placed"))
+        print("the shares twice. Only a target recorded as failed can be retried.")
+        return 1
+    if not mine(open_stops(state, w["symbol"], today), fp, paper):
+        raise TicketError("place and record this order's protective stop first (ticket.py stop --index %d): the "
+                          "target never goes in before its own stop" % a.index)
+    if paper:
+        state["orders"].append(leg_record(now, today, a.index, w, fp, qty, "target", "placed", paper=True))
+        write_json(a.state, state)
+        print("Paper: simulated resting target recorded (no broker tool called).")
+        return 0
+    if not a.status:
+        tool, args = target_call(w, broker, qty, fp)
+        print("Resting target for order %d: LIMIT %s %s %s at %s." % (
+            a.index, opposite(w["side"]), _str_num(float(qty)), w["symbol"], _p(w["take_profit_limit_price"])))
+        print("Your yes for the bracket covered this target. Call the %s tool:" % BROKERS[broker])
+        print("\n".join(call_lines([(tool, args)], indent="  ")))
+        print("Then: ticket.py target --index %d --filled-qty %s --status placed --broker-id ID (or --status failed)"
+              % (a.index, _str_num(float(qty))))
+        print(RESTING_WHY)
+        return 0
+    if a.status == "placed" and not a.broker_id:
+        raise TicketError("--status placed needs --broker-id (the stop's fill cancels the target by that id)")
+    state["orders"].append(leg_record(now, today, a.index, w, fp, qty, "target",
+                                      "placed" if a.status == "placed" else "failed",
+                                      broker_id=a.broker_id, note=a.note))
+    write_json(a.state, state)
+    if a.status == "placed":
+        print("Recorded the resting target for order %d, broker id %s." % (a.index, a.broker_id))
+        return 0
+    print("The target was NOT placed. The stop still protects the position; trader-alerts watches the target.")
+    return 1
+
+
+def other_leg_lines(state, sym, today, filled_kind, broker, paper, now=None):
+    """After a stop or target fills: the cancel calls for the leg that is still open, and the short check.
+    A simulated leg is cancelled in the log here (appended to state; the caller writes it)."""
+    other = open_legs(state, sym, today, "target") if filled_kind == "stop" else open_stops(state, sym, today)
+    lines = []
+    for r in other:
+        kind = "target" if filled_kind == "stop" else "stop"
+        oid = r.get("broker_order_id")
+        if paper or r.get("paper"):
+            state["orders"].append({"at": ist_iso(now) if now else r.get("at"), "date": today, "symbol": sym,
+                                    "status": kind + "_cancelled", "broker_order_id": oid, "paper": True,
+                                    "plain": "simulated %s %s cancelled with the other leg" % (LEG_WORDS[kind], oid)})
+            lines.append("Paper: the simulated %s %s is cancelled with it." % (LEG_WORDS[kind], oid))
+            continue
+        lines.append("NOW cancel the %s %s, before it fills too (your yes for the bracket covered this cancel):"
+                     % (LEG_WORDS[kind], oid))
+        lines.extend(call_lines([cancel_call(broker, kind, oid)], indent="  "))
+        lines.append("Then record it: ticket.py cancelled --symbol %s --broker-id %s (if it already executed: "
+                     "--failed executed)" % (sym, oid))
+    if other and not paper:
+        lines.append("Then check get_positions: a NEGATIVE quantity for %s means both legs filled and you are "
+                     "short. Buy that quantity back at once (a market BUY, %s), after the user's yes." % (sym, "MIS"))
+    return lines
+
+
+def cmd_cancelled(a):
+    """Record that an open stop or target was cancelled, or that its cancel failed because it executed."""
+    cfg = read_json(a.config, "config", required=False) or {}
+    sym = norm_symbol(a.symbol)
+    now, today = _clock(a)
+    state = load_state(a.state)
+    oid = str(a.broker_id)
+    kind = None
+    for k, recs in (("stop", open_stops(state, sym, today)), ("target", open_legs(state, sym, today, "target")),
+                    ("robo", open_legs(state, sym, today, "robo"))):
+        if any(str(r.get("broker_order_id")) == oid for r in recs):
+            kind = k
+    if kind is None:
+        raise TicketError("no open stop, target or Robo bracket %s for %s today" % (oid, sym))
+    status = kind + ("_filled" if a.failed == "executed" else "_cancelled")
+    state["orders"].append({"at": ist_iso(now), "date": today, "symbol": sym, "status": status,
+                            "broker_order_id": oid, "paper": is_paper(cfg),
+                            "plain": "%s %s %s" % (LEG_WORDS[kind], oid,
+                                                   "EXECUTED (cancel failed)" if a.failed == "executed" else
+                                                   "cancelled")})
+    write_json(a.state, state)
+    if a.failed == "executed":
+        print("Recorded: %s %s EXECUTED. Check get_positions now: a negative quantity means you are short; buy it "
+              "back at once after the user's yes. Record that fill with ticket.py fill." % (LEG_WORDS[kind], oid))
+        return 1
+    print("Recorded: %s %s cancelled." % (LEG_WORDS[kind], oid))
+    return 0
+
+
 def cmd_fill(a):
     cfg = read_json(a.config, "config", required=False) or {}
     now = parse_now(a.now)
@@ -1326,14 +1685,40 @@ def cmd_fill(a):
                       product=str(cfg.get("product") or "MIS").upper())
     state = load_state(a.state)
     state.setdefault("orders", []).append(fill_record(now, date, sym, a.side, a.qty, a.price, paper=paper))
-    if a.stop_hit:
+    if a.stop_hit and a.target_hit:
+        raise TicketError("one fill is either the stop or the target, not both")
+    robo = open_legs(state, sym, date, "robo")
+    if a.stop_hit or a.target_hit:
+        legs = robo or (open_stops(state, sym, date) if a.stop_hit else open_legs(state, sym, date, "target"))
+        if legs and _f(legs[-1].get("qty")) is not None and abs(_f(a.qty) - _f(legs[-1]["qty"])) > 1e-9:
+            raise TicketError("a partial fill: %s of the %s's %s shares. The %s stays open for the rest; do not "
+                              "cancel the other leg. Check get_orders, then record this sell without --%s-hit "
+                              "and cut the other leg to the shares still held (modify_order)" % (
+                                  a.qty, "Robo bracket" if robo else "stop" if a.stop_hit else "target",
+                                  legs[-1]["qty"], "order", "stop" if a.stop_hit else "target"))
+    if (a.stop_hit or a.target_hit) and robo:
+        state["orders"].append(dict(robo[-1], at=ist_iso(now), status="robo_filled",
+                                    note="its %s leg filled" % ("stop" if a.stop_hit else "target")))
+    elif a.stop_hit:
         live = open_stops(state, sym, date)
         if live:
             state["orders"].append(dict(live[-1], at=ist_iso(now), status="stop_filled"))
+    elif a.target_hit:
+        live = open_legs(state, sym, date, "target")
+        if live:
+            state["orders"].append(dict(live[-1], at=ist_iso(now), status="target_filled"))
+    lines = []
+    if (a.stop_hit or a.target_hit) and robo:
+        lines = ["Robo bracket: Angel cancels the other leg itself." +
+                 ("" if paper else " Confirm in get_orders that nothing is left open.")]
+    elif a.stop_hit or a.target_hit:
+        lines = other_leg_lines(state, sym, date, "stop" if a.stop_hit else "target", broker_of(cfg), paper, now)
     write_json(a.state, state)
     write_json(a.portfolio, pf)
     print("Recorded %s %s %s at %s on %s in %s. Cash now %s." % (a.side, a.qty, sym, inr(a.price), date,
                                                                 a.portfolio, inr(pf["cash"])))
+    if lines:
+        print("\n".join(lines))
     return 0
 
 
@@ -1364,11 +1749,18 @@ def cmd_flatten(a):
              "why": "flat by %s IST: closes the %s day trade before the broker's auto square-off (qty from %s)"
              % (flat_by, sym, source)}
     state = load_state(a.state)
-    live = open_stops(state, sym, today)
+    targets, robos = open_legs(state, sym, today, "target"), open_legs(state, sym, today, "robo")
+    live = open_stops(state, sym, today) + targets + robos
     ids = [str(s.get("broker_order_id")) for s in live if s.get("broker_order_id")]
     if ids:
         order["cancel_stop"] = {"broker_order_id": ",".join(ids), "broker_order_ids": ids,
                                 "paper": all(bool(s.get("paper")) for s in live)}
+        tids = [str(s.get("broker_order_id")) for s in targets if s.get("broker_order_id")]
+        rids = [str(s.get("broker_order_id")) for s in robos if s.get("broker_order_id")]
+        if tids:
+            order["cancel_stop"]["target_ids"] = tids
+        if rids:
+            order["cancel_stop"]["robo_ids"] = rids
     old = read_json(a.orders, "orders", required=False)
     replaced = len(old.get("orders", [])) if isinstance(old, dict) else 0
     doc = {"created_by": "trader-broker", "created_at": now.strftime("%Y-%m-%dT%H:%M:%SZ"), "status": "proposed",
@@ -1388,9 +1780,11 @@ def cmd_flatten(a):
     print("     limits or the entry window.")
     print("  3. ticket.py show, then the user's yes for this one ticket.")
     if ids and not order["cancel_stop"]["paper"]:
-        print("  4. The ticket cancels every open stop first (broker id %s), then sells. Without the cancels"
+        print("  4. The ticket cancels every open stop and target first (broker id %s), then sells. Without the"
               % ", ".join(ids))
-        print("     a stop could sell the same shares again and leave you short.")
+        print("     cancels they could sell the same shares again and leave you short.")
+        if robos:
+            print("     After cancelling the Robo bracket, check get_positions: sell only what is still held.")
         print("     " + CANCEL_FAILS)
     elif ids:
         print("  4. Paper: the simulated stop is cancelled with the simulated sell.")
@@ -1475,12 +1869,27 @@ def main(argv=None):
     p.add_argument("--status", choices=["placed", "failed"], help="record what happened to the stop call")
     p.add_argument("--broker-id")
     p.add_argument("--note")
+    p = sub.add_parser("target", help="step 3 (resting mode): the LIMIT target after the stop is placed")
+    common(p)
+    p.add_argument("--index", type=int, required=True)
+    p.add_argument("--filled-qty", help="shares that filled (default: the qty recorded with the result)")
+    p.add_argument("--status", choices=["placed", "failed"], help="record what happened to the target call")
+    p.add_argument("--broker-id")
+    p.add_argument("--note")
+    p = sub.add_parser("cancelled", help="record that an open stop or target was cancelled")
+    p.add_argument("--symbol", required=True)
+    p.add_argument("--broker-id", required=True)
+    p.add_argument("--failed", choices=["executed"], help="the cancel failed because the leg executed")
+    p.add_argument("--config", default="trader/config.json")
+    p.add_argument("--state", default="trader/state/broker.json")
+    clock(p)
     p = sub.add_parser("fill", help="record a fill in trader/portfolio.json")
     p.add_argument("--symbol", required=True)
     p.add_argument("--side", required=True, choices=["buy", "sell"])
     p.add_argument("--qty", required=True)
     p.add_argument("--price", required=True)
     p.add_argument("--stop-hit", action="store_true", help="this sell was the protective stop filling")
+    p.add_argument("--target-hit", action="store_true", help="this sell was the resting target (or Robo target) filling")
     p.add_argument("--date", help="YYYY-MM-DD (default: today in IST)")
     p.add_argument("--now")
     p.add_argument("--portfolio", default="trader/portfolio.json")
@@ -1505,7 +1914,8 @@ def main(argv=None):
         return 1
     try:
         return {"show": cmd_show, "approve": cmd_approve, "decline": cmd_decline, "result": cmd_result,
-                "stop": cmd_stop, "fill": cmd_fill, "flatten": cmd_flatten, "log": cmd_log}[a.cmd](a)
+                "stop": cmd_stop, "target": cmd_target, "cancelled": cmd_cancelled, "fill": cmd_fill,
+                "flatten": cmd_flatten, "log": cmd_log}[a.cmd](a)
     except TicketError as e:
         print("ticket.py: %s" % e, file=sys.stderr)
         return 1

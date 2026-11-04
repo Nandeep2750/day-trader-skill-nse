@@ -625,8 +625,10 @@ def day_bars(series, now_utc, ohlc=False):
         if ohlc and (h is None or lo is None):
             continue
         by_day[d] = {"d": d, "c": c, "h": h, "l": lo, "v": _vol(vs[i]) if vs else None}
-    bars = [by_day[d] for d in sorted(by_day)]
     s = session(today)
+    if s is not None and now.time() < s[0]:
+        by_day.pop(today, None)   # before the open there is no today's bar yet (a replay must not see one)
+    bars = [by_day[d] for d in sorted(by_day)]
     if bars and bars[-1]["d"] == today and s is not None and now.time() < s[1]:
         return bars[:-1], bars[-1]
     return bars, None

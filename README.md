@@ -48,7 +48,7 @@ The tools need Python 3.8 or newer. Nothing to pip install.
 | `/trader-budget` | Budget Manager | Sizes every position to your budget and max loss, charges included. |
 | `/trader-broker` | Order Executor | Zerodha or Angel One tickets, paper by default, never without your yes. |
 | `/trader-alerts` | Price Alerts | Rings on the stop, the target, flat-by and before your broker's auto square-off. |
-| `/trader-autopilot` | Paper Autopilot | Runs news, entry checks, plan, sizing, risk and alerts every 2 minutes on a Mac (launchd); stops at the ticket for your yes. |
+| `/trader-autopilot` | Paper Autopilot | Runs news, entry checks, plan, sizing, risk and alerts every 2 minutes on a Mac (launchd); stops at the ticket for your yes. Optional morning auto-pick: the NIFTY 500's most volatile stocks, ranked by the breakout rule's own history. A live dashboard (`dashboard.py`). |
 
 Dropped from the original: `trader-analyst` (read SEC EDGAR filings) and
 `trader-pelosi` (read US House trade disclosures). Neither has an NSE source
@@ -86,14 +86,16 @@ An example on real data: RELIANCE, Thursday October 29 2026.
 6. **`/trader-budget`** with a ₹1,00,000 account and a ₹1,000 max loss: the
    75 % position cap binds at 63 shares (₹73,980.90). Loss at the stop ₹686.70
    plus ₹73.07 estimated Zerodha charges = ₹759.77 all in. One bracket: buy 63
-   RELIANCE, market, MIS; then an SL-M stop at 1,163.40; target watched.
+   RELIANCE, market, MIS; then an SL-M stop at 1,163.40; then a resting target.
 7. **`/trader-risk`**: PASS, with the max loss, daily loss, trades per day,
    reward:risk, entry window, position size, cash, tick and product checks.
 8. **`/trader-broker`** shows the ticket and the exact Kite or Angel One tool
    call. You type yes for that one order; Claude's own "Allow once / Deny" card
-   asks again. After the fill it places the SL-M stop for the filled quantity.
-9. **`/trader-alerts`** rings on the stop, the target (then `flatten`: cancel
-   the stop, sell), at 15:10, and at 15:15 if a Zerodha position is still open.
+   asks again. After the fill it places the SL-M stop for the filled quantity,
+   then the LIMIT target (on Angel One the default sends all three as one Robo
+   bracket instead).
+9. **`/trader-alerts`** rings on the stop, the target (the other leg is then
+   cancelled at once), at 15:10, and at 15:15 if a Zerodha position is still open.
 
 ## Brokers
 
@@ -110,10 +112,13 @@ ID, MPIN and TOTP secret: together those are a full login to your account, so
 keep them only in the local MCP config file. Set its `HARD_MAX_ORDER_VALUE`
 to your `max_order_inr`.
 
-Neither broker offers a native bracket for NSE equity intraday, so the pack's
-bracket is: entry, then a protective SL-M stop after the fill, with the target
-watched by trader-alerts. A resting target and a resting stop together could
-both fill and leave you short. Setup details are in `trader-broker/SKILL.md`,
+The target is set by `"target_order"` in the config. On Angel One the default
+is `robo`: entry, target and stop go as one Robo bracket, and Angel cancels the
+other leg when one fills. On Zerodha (no intraday bracket) the default is
+`resting`: entry, then an SL-M stop, then a LIMIT target; when one fills the
+other is cancelled at once (the broker does not link them, so if both fill
+first you are briefly short and buy back). `watched` keeps only the stop at
+the broker and has trader-alerts watch the target. Setup details are in `trader-broker/SKILL.md`,
 with config examples in `trader-broker/claude_desktop_config.example.json`
 and `trader-broker/mcp.example.json`.
 
@@ -129,6 +134,7 @@ python3 trader-news/news.py --tickers RELIANCE,INFY --hours 12         # headlin
 python3 trader-entry/entry.py check RELIANCE --setup orb --write       # waiting / triggered / expired
 python3 trader-exit/exit.py plan --from trader/entry.json --stop or-mid --target 1R --write
 python3 trader-timemachine/timemachine.py run --write                  # 10,000 replays + the history
+python3 trader-timemachine/timemachine.py history BHEL SWIGGY          # the breakout rule's past record, no plan
 python3 trader-budget/size.py --write                                  # -> trader/orders.json
 python3 trader-risk/check.py                                           # PASS / BLOCK per order
 python3 trader-broker/ticket.py show                                   # the tickets, READY or not
@@ -136,6 +142,7 @@ python3 trader-alerts/alerts.py add --from-plan                        # stop, t
 python3 trader-alerts/alerts.py check                                  # rings what hit, once
 python3 trader-autopilot/autopilot.py install --project ~/paper-test   # writes a launchd plist, prints the command to load it
 python3 trader-autopilot/autopilot.py status                           # what the autopilot did today
+python3 trader-autopilot/dashboard.py --project ~/paper-test --open    # live dashboard on 127.0.0.1:8765
 ```
 
 `--now "2026-10-29 09:40"` pins any tool's clock (IST). Config lives in
@@ -207,7 +214,7 @@ trader-risk/        SKILL.md, check.py
 trader-budget/      SKILL.md, size.py, config.example.json, targets.example.json
 trader-broker/      SKILL.md, ticket.py, claude_desktop_config.example.json, mcp.example.json
 trader-alerts/      SKILL.md, alerts.py, alerts.example.json
-trader-autopilot/   SKILL.md, autopilot.py
+trader-autopilot/   SKILL.md, autopilot.py, dashboard.py
 tests/              unittest suite + offline fixtures
 ```
 

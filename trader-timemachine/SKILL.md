@@ -34,6 +34,8 @@ good-looking replay does not change that.
 python3 "${CLAUDE_SKILL_DIR}/timemachine.py" run                    # trader/plan.json, 10,000 replays, seed 19
 python3 "${CLAUDE_SKILL_DIR}/timemachine.py" run --write            # also save trader/timemachine.json
 python3 "${CLAUDE_SKILL_DIR}/timemachine.py" run --until 14:30      # end each replay at another time
+python3 "${CLAUDE_SKILL_DIR}/timemachine.py" history BHEL SWIGGY --target-r 2 --json   # no plan: the breakout
+                                                                   # rule's record on each symbol's past sessions
 python3 "${CLAUDE_SKILL_DIR}/timemachine.py" run --json
 python3 "${CLAUDE_SKILL_DIR}/timemachine.py" run --symbol RELIANCE --date 2026-10-29 \
     --entry 1174.30 --stop 1163.40 --target 1185.20 --entry-time "9:40 AM"

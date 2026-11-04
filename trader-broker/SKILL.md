@@ -44,7 +44,11 @@ python3 "${CLAUDE_SKILL_DIR}/ticket.py" result --index 1 --status placed --broke
 python3 "${CLAUDE_SKILL_DIR}/ticket.py" result --index 1 --status paper          # paper mode
 python3 "${CLAUDE_SKILL_DIR}/ticket.py" stop --index 1                           # step 2: the stop call
 python3 "${CLAUDE_SKILL_DIR}/ticket.py" stop --index 1 --status placed --broker-id ID
+python3 "${CLAUDE_SKILL_DIR}/ticket.py" target --index 1                         # step 3 (resting): the target call
+python3 "${CLAUDE_SKILL_DIR}/ticket.py" target --index 1 --status placed --broker-id ID
 python3 "${CLAUDE_SKILL_DIR}/ticket.py" fill --symbol RELIANCE --side sell --qty 20 --price 1214.40 --stop-hit
+python3 "${CLAUDE_SKILL_DIR}/ticket.py" fill --symbol RELIANCE --side sell --qty 20 --price 1240.40 --target-hit
+python3 "${CLAUDE_SKILL_DIR}/ticket.py" cancelled --symbol RELIANCE --broker-id ID   # the other leg, cancelled
 python3 "${CLAUDE_SKILL_DIR}/ticket.py" flatten --symbol RELIANCE --qty 20
 python3 "${CLAUDE_SKILL_DIR}/ticket.py" log
 ```
@@ -68,23 +72,49 @@ symbols (RELIANCE, M&M, BAJAJ-AUTO); a `.NS` suffix is stripped, `.BO` is refuse
 
 ## How a bracket works on NSE
 
-Neither Kite nor Angel One offers a bracket order for NSE equity intraday any
-more, so the pack builds its own, in two steps:
+How the target goes in is `"target_order"` in `trader/config.json`. The
+default depends on the broker; the ticket says which one applies.
+
+**`robo`, Angel One's default: one Robo bracket.** The entry, the target and
+the stop go as ONE `place_order` (variety "ROBO", producttype "BO", ordertype
+"LIMIT", `price` the entry, `squareoff` the target distance and `stoploss`
+the stop distance, both in rupees from the entry). Angel One holds both legs
+and cancels the other when one fills, so they can never both fill. There is
+no step 2 or 3. Robo is intraday only, needs a LIMIT entry (a market order is
+sent at the plan's entry price, so it may not fill if the price has run), and
+Angel refuses it on low-volume stocks: if it is refused, say so and offer
+`"target_order": "resting"`. Record it with `result --status placed
+--broker-id <the Robo's order id>`; check `get_orders` that both legs are open.
+
+**`resting`, Zerodha's default (Angel One on request): three steps.**
 
 1. **The entry**: a MARKET (or LIMIT) BUY, product MIS (intraday).
 2. **The protective stop, right after the entry fills**: an SL-M SELL for
    the filled quantity at the plan's stop (Kite `order_type` "SL-M" with
    `trigger_price`; Angel One `variety` "STOPLOSS", `ordertype`
    "STOPLOSS_MARKET" with `triggerprice` and `price` "0", the SmartAPI
-   convention for market types). The user's yes for the bracket
-   ticket covers this stop; Claude's Allow once card still asks for it.
+   convention for market types).
+3. **The resting target, right after the stop is placed**: a LIMIT SELL for
+   the filled quantity at the plan's target (`ticket.py target --index N`).
+   A wick that touches the target fills it, even between two checks.
 
-**The target is never a resting order.** A resting target sell next to a
-resting stop sell could both fill and leave the user short. trader-alerts
-watches the target; when it rings, flatten (which cancels the stop first).
+The broker does NOT link the stop and the target. **When one fills, cancel the
+other at once**: `ticket.py fill ... --target-hit` (or `--stop-hit`) records
+the fill and prints the cancel call for the leg that is still open. If that
+cancel fails because the leg already executed, both legs filled and the user
+is short: `ticket.py cancelled --symbol S --broker-id ID --failed executed`,
+check `get_positions`, and offer to buy the negative quantity back at once
+(a market BUY, MIS) for the user's yes.
 
-Until step 2 is placed, the position has no stop at the exchange: place it
-at once. If the stop call fails, say so loudly and offer to retry or flatten.
+**`watched`: the old way.** Only the stop rests; trader-alerts watches the
+target and the user flattens when it rings. A wick between two checks is
+missed.
+
+The user's yes for the bracket ticket covers its stop, its target and the
+cancel of the other leg; Claude's Allow once card still asks for each call.
+Until the stop is placed (resting and watched), the position has no stop at
+the exchange: place it at once. If the stop call fails, say so loudly and
+offer to retry or flatten. The target never goes in before the stop.
 
 ## Paper mode (the default)
 
@@ -257,23 +287,37 @@ put an order tool in `allow`.
    the `modify_order` call to change its quantity instead (Kite: variety,
    order_id, order_type SL-M, quantity, trigger_price; Angel One: all its
    modify_order fields with price "0").
-8. If the config changes after a yes (paper, broker), `result` and `stop` refuse:
+8. Resting mode only: right after the stop, `ticket.py target --index N` prints
+   the LIMIT target call. Make it, then `ticket.py target --index N --status
+   placed --broker-id <id>`. It refuses before the stop is recorded, and never
+   places a second target. Robo mode has no step 7 or 8.
+9. If `target_order` changes after a yes, the ticket is no longer the one the user approved: `result`,
+   `stop` and `target` answer that no yes (or no placed entry) is recorded for it. Put the config back
+   to what it was when the user said yes, record what happened, and only then change it.
+10. If the config changes after a yes (paper, broker), `result`, `stop` and `target` refuse:
    "config changed since your yes: re-check and re-approve".
 
 ## Steps: while it is open, and out by flat_by
 
 - trader-alerts watches the stop, the target and the flat-by time
   (`alerts.py add --from-plan`). The SL-M stop at the exchange does the stopping.
-- When the stop fills, record it: `ticket.py fill --symbol RELIANCE --side
-  sell --qty 20 --price 1214.40 --stop-hit`.
+- When the stop or a resting target fills (trader-alerts rings; `get_orders`
+  shows it COMPLETE), record it: `ticket.py fill --symbol RELIANCE --side sell
+  --qty 20 --price 1214.40 --stop-hit` (or `--target-hit`). In resting mode it
+  prints the cancel for the other leg: make that call at once, then
+  `ticket.py cancelled --symbol RELIANCE --broker-id ID`. A Robo bracket
+  cancels its own other leg; confirm in `get_orders`.
 - At the target, or by `flat_by` (15:10 IST), anything still open gets closed:
   1. Ask the broker what is held: `get_positions` (read only). If the stop
      already filled, there is nothing to sell.
   2. `ticket.py flatten --symbol RELIANCE --qty 20` writes the flatten
-     ticket: cancel EVERY recorded open stop for the symbol, one call each
-     (Kite `cancel_order` {variety "regular", order_id}; Angel One
-     `cancel_order` {variety "STOPLOSS", orderid}), then a MARKET SELL in the
-     position's own product (MIS unless the fill recorded otherwise).
+     ticket: cancel EVERY recorded open stop, resting target and Robo bracket
+     for the symbol, one call each (Kite `cancel_order` {variety "regular",
+     order_id}; Angel One `cancel_order` {variety "STOPLOSS" for a stop,
+     "NORMAL" for a target, "ROBO" for a Robo, orderid}), then a MARKET SELL in
+     the position's own product (MIS unless the fill recorded otherwise). After
+     cancelling a Robo, call `get_positions` again: Angel may already have
+     closed the position; sell only what is still held.
      **If any cancel fails because the stop already executed, do NOT send the
      sell; check get_positions.** If a cancel fails because the stop was already
      cancelled, it is gone: the sell can go.
@@ -296,7 +340,7 @@ put an order tool in `allow`.
 ORDER 1 of 1, LIVE ACCOUNT, REAL MONEY, Zerodha (Kite MCP)
   BUY 20 RELIANCE on NSE, market, intraday (MIS), good for today
   stop-loss 1215.60 (SL-M, placed after the entry fills)
-  target 1240.40 (watched by trader-alerts, not a resting order)
+  target 1240.40 (a resting LIMIT order, placed after the stop; when one fills, cancel the other)
   max loss about ₹248 if the stop fills at 1215.60 (it can fill worse in a fast market)
   fingerprint: 1a2b3c4d
   READY: trader-risk PASS, waiting for your yes
@@ -308,6 +352,9 @@ ORDER 1 of 1, LIVE ACCOUNT, REAL MONEY, Zerodha (Kite MCP)
   Step 2, only after the entry fills: the protective stop for the filled qty
     1. place_order with exactly:
        {... "transaction_type": "SELL", "order_type": "SL-M", "trigger_price": 1215.60 ...}
+  Step 3, only after the stop is placed: the resting target for the filled qty
+    1. place_order with exactly:
+       {... "transaction_type": "SELL", "order_type": "LIMIT", "price": 1240.40 ...}
 ```
 
 The `why` and the plan stay in the file; they are never sent.
@@ -319,7 +366,8 @@ The `why` and the plan stay in the file; they are never sent.
 - Never places orders from a scheduled or background task: nobody is there to say yes.
 - Never asks for, reads, stores or repeats API keys, secrets, MPINs or TOTP secrets.
 - Never switches `"paper"` to false. The user does that themselves.
-- Never leaves a resting target and a resting stop at the same time.
+- Never leaves a resting target and a resting stop unwatched: when one fills, the other is cancelled at once.
+- Never places a target before the stop, or a second stop or target for the same position.
 - Never passes `force: true` to angel-one-mcp, and never uses F&O, options or BSE.
 - Never promises a fill price: a market order and an SL-M stop fill at whatever the market gives.
 

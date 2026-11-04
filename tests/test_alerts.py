@@ -146,6 +146,55 @@ class Quotes(unittest.TestCase):
             shutil.rmtree(d)
 
 
+class Bars(unittest.TestCase):
+    """alerts.py bars: today's 5-minute highs and lows, read-only (the autopilot's touch check)."""
+
+    FX = os.path.join(FIX, "trader-entry", "RELIANCE-2026-10-29-5m.json")
+
+    def setUp(self):
+        self.d = tempfile.mkdtemp()
+        shutil.copy(self.FX, os.path.join(self.d, "bars-RELIANCE.json"))
+
+    def tearDown(self):
+        shutil.rmtree(self.d)
+
+    def test_parse_real_bars(self):
+        with open(self.FX) as fh:
+            bars = alerts.parse_bars(fh.read(), "reliance.ns")
+        day = [b for b in bars if b["start"].startswith("2026-10-29")]
+        self.assertEqual((day[0]["start"], day[-1]["start"], len(day)), ("2026-10-29 09:15", "2026-10-29 15:25", 74))
+        b955 = [b for b in day if b["start"] == "2026-10-29 09:55"][0]
+        self.assertEqual((b955["high"], b955["low"], b955["close"]), (1182.0, 1171.0, 1173.8))
+
+    def test_url_interval(self):
+        self.assertEqual(alerts.yahoo_url("M&M", interval="5m"),
+                         "https://query2.finance.yahoo.com/v8/finance/chart/M%26M.NS?range=1d&interval=5m")
+
+    def test_replay_shows_only_closed_bars_of_that_day(self):
+        code, out, err = run(["bars", "RELIANCE", "--offline", self.d, "--now", "2026-10-29 10:02", "--json"])
+        self.assertEqual(code, 0, err)
+        doc = json.loads(out)
+        self.assertEqual((doc["date"], doc["interval"]), ("2026-10-29", "5m"))
+        starts = [b["start"][11:] for b in doc["bars"]["RELIANCE"]]
+        self.assertEqual((starts[0], starts[-1]), ("09:15", "09:55"))   # the 10:00 bar is still forming at 10:02
+
+    def test_one_minute_replay_cut(self):
+        code, out, _ = run(["bars", "RELIANCE", "--interval", "1m", "--offline", self.d, "--now", "2026-10-29 10:02",
+                            "--json"])
+        doc = json.loads(out)
+        self.assertEqual(doc["interval"], "1m")
+        self.assertEqual(doc["bars"]["RELIANCE"][-1]["start"], "2026-10-29 10:00")   # closed by 10:01, so shown
+
+    def test_other_day_has_no_bars_and_missing_file_is_an_error(self):
+        code, out, _ = run(["bars", "RELIANCE", "TCS", "--offline", self.d, "--now", "2026-10-30 10:00", "--json"])
+        doc = json.loads(out)
+        self.assertEqual(doc["bars"]["RELIANCE"], [])
+        self.assertIn("no offline bars file", doc["errors"][0])
+        code, out, _ = run(["bars", "RELIANCE", "--offline", self.d, "--now", "2026-10-29 10:02"])
+        self.assertIn("RELIANCE   9 bars today, high \u20b91,182.00", out)
+        self.assertEqual(run(["bars"])[0], 1)
+
+
 class FakeNet(object):
     """Stands in for urllib: answers each request with the next status code."""
 
@@ -299,7 +348,7 @@ class Rules(unittest.TestCase):
                       % (RS, RS), rings[0]["message"])
         rings, st = self.at("2026-11-03 15:00", rules, st)      # the real 15:29 quote, 1307.90
         self.assertEqual([r["id"] for r in rings], ["reliance-plan-target"])
-        self.assertIn("The target is not a resting order: run /trader-broker flatten (cancels the stop, then sells).",
+        self.assertIn("If it is only watched, run /trader-broker flatten (cancels the stop, then sells).",
                       rings[0]["message"])
 
     def test_flat_by_and_the_config(self):

@@ -205,8 +205,9 @@ def inr(x):
 
 # ---------------------------------------------------------------- quotes
 
-def yahoo_url(sym, host=YAHOO_HOSTS[0]):
-    return "https://%s/v8/finance/chart/%s?range=1d&interval=1d" % (host, urllib.parse.quote(nse_symbol(sym) + ".NS"))
+def yahoo_url(sym, host=YAHOO_HOSTS[0], interval="1d"):
+    return "https://%s/v8/finance/chart/%s?range=1d&interval=%s" % (host, urllib.parse.quote(nse_symbol(sym) + ".NS"),
+                                                                    interval)
 
 
 def parse_yahoo(text, sym):
@@ -259,12 +260,12 @@ def _get(url, timeout=20):
         raise AlertError("could not reach %s: %s" % (url.split("/")[2], e.reason))
 
 
-def fetch_yahoo(sym, timeout=20):
+def fetch_yahoo(sym, timeout=20, interval="1d"):
     """query2 first. A 429 waits BACKOFF seconds and tries once more; a 429 or a 5xx
     after that moves on to query1. A 404 comes back as Yahoo's own error JSON."""
     last = None
     for host in YAHOO_HOSTS:
-        url = yahoo_url(sym, host)
+        url = yahoo_url(sym, host, interval)
         code, text = _get(url, timeout)
         if code == 429:
             _sleep(BACKOFF)
@@ -288,6 +289,65 @@ def _offline_text(folder, sym):
         with gzip.open(base + ".gz", "rt", encoding="utf-8") as fh:
             return fh.read()
     raise AlertError("no offline quote file %s" % base)
+
+
+BAR_INTERVALS = {"1m": 1, "5m": 5}
+
+
+def parse_bars(text, sym):
+    """Intraday bars from a Yahoo chart, oldest first: [{"start": "YYYY-MM-DD HH:MM" IST, "high",
+    "low", "close"}]. Bars Yahoo left empty are skipped."""
+    sym = nse_symbol(sym)
+    try:
+        data = json.loads(text)
+        res = data["chart"]["result"]
+    except (ValueError, KeyError, TypeError):
+        raise AlertError("Yahoo returned something unexpected for %s" % sym)
+    if not res:
+        err = (data.get("chart") or {}).get("error") or {}
+        raise AlertError("Yahoo has no data for %s: %s" % (sym, err.get("description", "unknown symbol")))
+    ts = res[0].get("timestamp") or []
+    q = (res[0].get("indicators", {}).get("quote") or [{}])[0]
+    col = lambda name: q.get(name) or [None] * len(ts)
+    bars = []
+    for t, hi, lo, cl in zip(ts, col("high"), col("low"), col("close")):
+        if hi is None or lo is None or cl is None:
+            continue
+        start = to_ist(datetime.datetime(1970, 1, 1) + datetime.timedelta(seconds=int(t)))
+        bars.append({"start": start.strftime("%Y-%m-%d %H:%M"), "high": round(float(hi), 2),
+                     "low": round(float(lo), 2), "close": round(float(cl), 2)})
+    return bars
+
+
+def _offline_bars(folder, sym):
+    base = os.path.join(folder, "bars-%s.json" % sym)
+    if os.path.exists(base):
+        with open(base, encoding="utf-8") as fh:
+            return fh.read()
+    if os.path.exists(base + ".gz"):
+        with gzip.open(base + ".gz", "rt", encoding="utf-8") as fh:
+            return fh.read()
+    raise AlertError("no offline bars file %s" % base)
+
+
+def get_bars(symbols, offline=None, pause=PAUSE, interval="5m"):
+    """{SYM: [bar, ...]} and [errors]. One request per symbol, with a pause between."""
+    out, errors = {}, []
+    asked = 0
+    for raw in symbols:
+        try:
+            sym = nse_symbol(raw)
+            if offline:
+                text = _offline_bars(offline, sym)
+            else:
+                if asked and pause:
+                    _sleep(pause)
+                asked += 1
+                text = fetch_yahoo(sym, interval=interval)
+            out[sym] = parse_bars(text, sym)
+        except AlertError as e:
+            errors.append(str(e))
+    return out, errors
 
 
 def get_quotes(symbols, offline=None, pause=PAUSE):
@@ -488,11 +548,14 @@ def evaluate(rules, quotes, status, state, now_utc, held=None):
                                                        label, inr(r["price"]),
                                                        (" (" + r["note"] + ")") if r.get("note") else "")
                 if r["type"] == "target":
-                    msg += (" The target is not a resting order: run /trader-broker flatten "
-                            "(cancels the stop, then sells).")
+                    msg += (" If the target rests at the broker (a Robo bracket or a resting LIMIT), check "
+                            "get_orders: filled, record it (trader-broker fill --target-hit, which prints the "
+                            "cancel for the stop). If it is only watched, run /trader-broker flatten (cancels "
+                            "the stop, then sells).")
                 elif r["type"] == "stop":
                     msg += (" The stop is an SL-M order at the broker: check your positions "
-                            "and record the fill (trader-broker fill).")
+                            "and record the fill (trader-broker fill --stop-hit, which prints the cancel for a "
+                            "resting target).")
                 rings.append({"id": rid, "symbol": sym, "message": msg})
                 rung[rid] = stamp
             elif not hit and rid in rung and r.get("rearm"):
@@ -627,6 +690,38 @@ def cmd_quote(a):
     return 0 if quotes else 1
 
 
+def cmd_bars(a):
+    """Read-only: today's 1- or 5-minute highs and lows, so a stop or target touched between two checks
+    is not missed. With --now (a replay) only bars that had closed by then are shown."""
+    syms = _dedupe(a.symbols)
+    if not syms:
+        raise AlertError("which symbols? alerts.py bars RELIANCE INFY")
+    now = parse_now(a.now)
+    today = to_ist(now).strftime("%Y-%m-%d")
+    minutes = BAR_INTERVALS[a.interval]
+    got, errors = get_bars(syms, a.offline, interval=a.interval)
+    for sym, bars in got.items():
+        keep = [b for b in bars if b["start"][:10] == today]
+        if a.now:
+            cut = (to_ist(now) - datetime.timedelta(minutes=minutes)).strftime("%Y-%m-%d %H:%M")
+            keep = [b for b in keep if b["start"] <= cut]
+        got[sym] = keep
+    if a.json:
+        print(json.dumps({"date": today, "interval": a.interval, "bars": got, "errors": errors}, indent=2))
+    else:
+        for sym, bars in got.items():
+            if bars:
+                print("%-10s %d bars today, high %s, low %s (last bar %s)" % (
+                    sym, len(bars), inr(max(b["high"] for b in bars)), inr(min(b["low"] for b in bars)),
+                    bars[-1]["start"][11:]))
+            else:
+                print("%-10s no bars today" % sym)
+        for e in errors:
+            print("error: " + e)
+        print("Bars are free, delayed and unofficial: for alerts only. Your broker's price is the one that fills.")
+    return 0 if got else 1
+
+
 def cmd_check(a):
     doc = _read(a.rules, None)
     if not doc or not doc.get("rules"):
@@ -660,8 +755,9 @@ def cmd_check(a):
         if rings:
             print("An alert is information, not an order. The stop is an SL-M order at the broker (placed after "
                   "the entry filled): check your positions (Kite get_positions, Angel One positions) and record "
-                  "any fill (ticket.py fill). The target is not a resting order: to take profit or to close "
-                  "yourself, ticket.py flatten (cancel the stop, then sell), then trader-risk and your yes.")
+                  "any fill (ticket.py fill --stop-hit / --target-hit). A resting target (Robo or LIMIT) fills at the "
+                  "broker; a watched one does not: to take profit or to close yourself, ticket.py flatten (cancel "
+                  "the open legs, then sell), then trader-risk and your yes.")
     return 0 if rings else 1
 
 
@@ -786,6 +882,10 @@ def main(argv=None):
     p.add_argument("--plan", default="trader/plan.json")
     p.add_argument("--write", nargs="?", const="trader/prices.json", metavar="PATH",
                    help="save to prices.json (default trader/prices.json)")
+    p = sub.add_parser("bars", help="today's 1- or 5-minute highs and lows (read-only)")
+    net(p)
+    p.add_argument("--interval", choices=sorted(BAR_INTERVALS), default="5m")
+    p.add_argument("symbols", nargs="*")
     p = sub.add_parser("check", help="check every rule, ring what hit")
     net(p)
     p.add_argument("--rules", default="trader/alerts.json")
@@ -830,7 +930,7 @@ def main(argv=None):
         ap.print_help()
         return 1
     try:
-        return {"clock": cmd_clock, "quote": cmd_quote, "check": cmd_check, "add": cmd_add,
+        return {"clock": cmd_clock, "quote": cmd_quote, "bars": cmd_bars, "check": cmd_check, "add": cmd_add,
                 "list": cmd_list, "reset": cmd_reset}[a.cmd](a)
     except AlertError as e:
         print("alerts.py: %s" % e, file=sys.stderr)

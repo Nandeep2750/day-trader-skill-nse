@@ -42,12 +42,13 @@ python3 "${CLAUDE_SKILL_DIR}/alerts.py" add --symbol INFY --pct 3
 python3 "${CLAUDE_SKILL_DIR}/alerts.py" check                          # exit 0 = something rang
 python3 "${CLAUDE_SKILL_DIR}/alerts.py" quote RELIANCE --write         # -> trader/prices.json
 python3 "${CLAUDE_SKILL_DIR}/alerts.py" quote --holdings --write       # portfolio + plan symbols
+python3 "${CLAUDE_SKILL_DIR}/alerts.py" bars RELIANCE --interval 1m --json  # today's 1- or 5-minute highs and lows, read-only
 python3 "${CLAUDE_SKILL_DIR}/alerts.py" list
 python3 "${CLAUDE_SKILL_DIR}/alerts.py" reset reliance-plan-stop
 ```
 
 `--now "2026-11-03 15:10"` pins the clock (IST); `--offline DIR` reads saved
-quote files (`yahoo-<SYMBOL>.json`) instead of the network.
+quote files (`yahoo-<SYMBOL>.json`, and `bars-<SYMBOL>.json` for `bars`) instead of the network.
 
 Symbols are plain NSE symbols: `RELIANCE`, `M&M`, `BAJAJ-AUTO`, `360ONE`. A
 trailing `.NS` is dropped; a `.BO` (BSE) symbol is refused, because this pack
@@ -146,7 +147,7 @@ day. A `check` reading the real 15:29 quote, 1307.90:
 ```
 NSE OPEN (2026-11-03 15:15 IST, regular session).
 ALERT RELIANCE is ₹1,307.90: at or above your target ₹1,304.50 (plan target: 1R (one times the risk)).
-The target is not a resting order: run /trader-broker flatten (cancels the stop, then sells).
+If the target rests at the broker (a Robo bracket or a resting LIMIT), check get_orders: filled, record it (trader-broker fill --target-hit, which prints the cancel for the stop). If it is only watched, run /trader-broker flatten (cancels the stop, then sells).
 ALERT Square-off in 5 minutes: Zerodha auto squares off intraday (MIS) positions at 15:20 IST and
 charges for it. RELIANCE is still open: trader-broker flatten --symbol RELIANCE builds the ticket
 (cancel the stop, then sell), then trader-risk and your yes.

@@ -56,6 +56,7 @@ never touches the live plan, orders, risk verdicts, news state or notes.
 
 | when | what | notification |
 | --- | --- | --- |
+| `auto_pick.at` (08:55) to `auto_pick.until` (09:25), once, only with `auto_pick` on | the morning pick: `trader-scanner volatile --index nifty500 --top 20` (works before the open, on past sessions), `trader-timemachine history` on those 20 with the autopilot's own stop and target, `trader-news --json` to drop any with results today; keeps the best `top` (4) by average R that have at least `min_trades` (15) past breakouts and an average R of at least `min_avg_r` (0.0). Up to 300 s a step; later ticks wait. A failed step retries next tick; past `until`, the configured symbols are watched instead | yes: the picks with their average R, trade count and ATR %, and every skip with its reason |
 | `news_at` (09:00) to 09:15 | `trader-news` for the symbols; if every source failed (exit 2) it retries until 9:15 and says why | yes; flags RESULTS DUE and important NSE filings |
 | `entry_from` (09:30) to `no_entries_after` (14:45) | `trader-entry check SYMBOL --setup orb` for every symbol not yet done | no, until something happens |
 | a fresh trigger (its bar closed at most 10 minutes ago) and no ticket pending | `trader-exit plan` (config stop / target), a copy of the plan to `trader/autopilot/plan-SYMBOL.json`, `trader-timemachine run`, `trader-budget`, `trader-risk` (an old `trader/state/risk.json` is removed first, then the new verdict is read from it) | yes: time, price, stop, target, shares, PASS / BLOCK (or "risk check failed"), odds, "show ticket" |
@@ -78,7 +79,8 @@ so it is never silent.
 
 ## Settings
 
-Symbols, first found wins:
+Symbols: with `"auto_pick"` on, the morning pick (above), plus any open paper
+trade. Otherwise (or as the pick's fallback), first found wins:
 
 1. `trader/config.json`: `"autopilot": {"symbols": ["CARTRADE", "AEGISLOG"]}`
 2. `trader/universe.txt`: one NSE symbol per line
@@ -86,6 +88,14 @@ Symbols, first found wins:
    is from today or the previous trading day
 
 A bad symbol is skipped and noted; the others still run.
+
+`"auto_pick": true` turns the morning pick on with its defaults; an object
+overrides them: `{"top": 4, "candidates": 20, "index": "nifty500" | "all",
+"min_avg_r": 0.0, "min_trades": 15, "at": "08:55", "until": "09:25"}`;
+`{"enabled": false}` or `false` turns it off. The history is about 30 past
+breakouts a stock: a small sample, a filter, not a forecast. The pick is in
+`status` and `trader/state/autopilot-YYYY-MM-DD.json` ("pick": every
+candidate's average R, trades, ATR % and why it was skipped).
 
 Optional, in the same `"autopilot"` block: `"stop"` (`or-mid`, `or-low`,
 `price:X`, `pct:X`, `atr:K`; default `or-mid`), `"target"` (`2R`, `1.5R`,
@@ -118,7 +128,8 @@ run trader-broker's `ticket.py`, and only these calls (checked before every run)
 | first tick of the day | checks that trader-broker's `ticket.py approve --help` knows `--auto-paper`; if not, no automatic action all day and one loud notification |
 | a fresh trigger, risk PASS | a fresh quote (at most 15 minutes old) is the fill price, else the trigger close; if that quote is already at or through the stop or the target the trade is skipped. Then `ticket.py show --json` (READY, same symbol and side), the trade is saved as "entering", `approve --auto-paper`, `result --status paper`, alerts from the plan snapshot. Notified as "AUTO-PAPER BUY". |
 | risk BLOCK or ticket not READY | no trade, notified. That order in `trader/orders.json` is recorded as the autopilot's own, so it never blocks a later trigger |
-| every tick while a paper trade is open | a fresh quote for it with `trader-alerts quote` (alert rules are not needed) |
+| every tick while a paper trade is open | a fresh quote for it with `trader-alerts quote` (alert rules are not needed), and today's 1-minute bars with `trader-alerts bars --interval 1m` |
+| a 1-minute bar after the entry reached the stop or the target | closes at the stop price or the target price, even if the price was back by the next tick: a 2-minute check misses a wick between two checks, the bars do not. The first such bar decides; a bar that reached both counts as the stop (the order inside a bar is unknown; the Time Machine's rule too). Bars start the minute after the fill's minute, so nothing from before the buy counts; bars from `flat_by` on are left to the flat-by exit. The note says when ("touched at 10:11, booked at 10:30"); the journal's exit time is the touch time, `booked_at` the tick that booked it. If the bars cannot be read, the quote rules below decide alone |
 | quote at or under the stop | closes at the stop price (an SL-M is assumed to fill at its trigger; slippage is not modelled); retried every tick while the price stays there |
 | quote at or over the target | closes at the quote |
 | `flat_by` (15:10) | closes at the latest fresh quote |

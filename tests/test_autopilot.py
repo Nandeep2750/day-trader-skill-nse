@@ -36,8 +36,10 @@ class FakeRunner:
 
     def __init__(self, project, entry=None, alerts_out="", size_code=0, risk="PASS", add_code=0,
                  news_code=0, age=0, ready=True, quotes=None, rings=None, auto_help=True, quote_age=0,
-                 approve_code=0, result_code=0):
+                 approve_code=0, result_code=0, bars=None, vol=None, hist=None, due=None, scan_code=0):
         self.project, self.calls = project, []
+        self.vol, self.hist, self.due, self.scan_code = vol or [], hist or {}, due or [], scan_code
+        self.bars = bars or {}              # symbol -> [{"start": "YYYY-MM-DD HH:MM", "high", "low", "close"}]
         self.auto_help, self.quote_age = auto_help, quote_age
         self.approve_code, self.result_code = approve_code, result_code
         self.ready, self.quotes, self.rings = ready, quotes or {}, rings or []
@@ -52,6 +54,19 @@ class FakeRunner:
         self.calls.append((tool, list(args)))
         now = args[args.index("--now") + 1] if "--now" in args else "%s 09:50" % DAY
         tr = os.path.join(cwd, "trader")
+        if tool == "trader-scanner/scan.py":
+            if self.scan_code:
+                return self.scan_code, "scan.py: Yahoo answered HTTP 429"
+            out = os.path.join(cwd, args[args.index("--out") + 1])
+            os.makedirs(os.path.dirname(out), exist_ok=True)
+            with open(out, "w") as fh:
+                json.dump({"mode": "volatile", "hits": [{"symbol": k, "atr_pct": v} for k, v in self.vol]}, fh)
+            return 0, "Wrote %d hits" % len(self.vol)
+        if tool == "trader-timemachine/timemachine.py" and args[0] == "history":
+            syms = [a for a in args[1:] if not a.startswith("-") and a.upper() == a and not a[:1].isdigit()]
+            return 0, json.dumps({"history": {k: v for k, v in self.hist.items() if k in syms}, "errors": []})
+        if tool == "trader-news/news.py" and "--json" in args:
+            return 0, json.dumps({"results_due": self.due, "items": [], "moves": [], "notes": []})
         if tool == "trader-news/news.py":
             if self.news_code == 2:
                 return 2, "Nothing new.\n  note: headlines for CARTRADE: HTTP 429\n  note: NSE announcements feed: HTTP 503\n"
@@ -100,6 +115,10 @@ class FakeRunner:
         if tool == "trader-alerts/alerts.py":
             if args[0] == "add":
                 return self.add_code, "Added 4 alerts"
+            if args[0] == "bars":
+                syms = [a for a in args[1:] if not a.startswith("-") and a.upper() == a and not a[:4].isdigit()]
+                return 0, json.dumps({"date": now[:10], "interval": "5m", "errors": [],
+                                      "bars": {k: v for k, v in self.bars.items() if k in syms}})
             if args[0] == "quote":
                 t = (datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None)
                      - datetime.timedelta(minutes=self.quote_age)).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -820,6 +839,71 @@ class AutoPaper(Base):
         self.tick("10:32", r)
         self.assertEqual(len(self.ticket_calls(r, "flatten")), 1)  # closed stays closed
 
+    def bar(self, hhmm, high, low):
+        return {"start": "%s %s" % (DAY, hhmm), "high": high, "low": low, "close": (high + low) / 2}
+
+    def test_a_target_touched_between_ticks_exits_at_the_target(self):
+        """The SWIGGY case: a wick reaches the target between two 2-minute checks, then falls back."""
+        r = FakeRunner(self.project, entry={"CARTRADE": "triggered"})
+        self.tick("09:50", r)
+        tr = self.state()["trades"]["CARTRADE"]
+        target, stop = tr["target"], tr["stop"]
+        r.quotes = {"CARTRADE": target - 30}
+        r.bars = {"CARTRADE": [self.bar("09:40", target + 50, stop - 50),       # before the entry's bar: ignored
+                               self.bar("09:50", 2350.0, 2340.0),
+                               self.bar("10:10", target + 2, 2350.0),
+                               self.bar("10:15", target - 25, target - 35)]}
+        self.tick("10:16", r)
+        tr = self.state()["trades"]["CARTRADE"]
+        self.assertEqual((tr["status"], tr["exit_reason"], tr["exit_price"], tr["touch_bar"]),
+                         ("closed", "target", target, "10:10"))
+        self.assertEqual(self.ticket_calls(r, "result")[1][6], "%.2f" % target)
+        self.assertTrue(any("(target, touched at 10:10, booked at 10:16)" in n for n in self.notes))
+        self.assertEqual((tr["exit_time"], tr["booked_at"]), ("10:10", "10:16"))
+
+    def test_a_bar_that_reached_both_counts_as_the_stop(self):
+        r = FakeRunner(self.project, entry={"CARTRADE": "triggered"})
+        self.tick("09:50", r)
+        tr = self.state()["trades"]["CARTRADE"]
+        r.quotes = {"CARTRADE": 2350.0}
+        r.bars = {"CARTRADE": [self.bar("10:05", tr["target"] + 1, tr["stop"] - 1)]}
+        self.tick("10:12", r)
+        tr = self.state()["trades"]["CARTRADE"]
+        self.assertEqual((tr["exit_reason"], tr["exit_price"]), ("stop", tr["stop"]))
+
+    def test_no_touch_keeps_the_quote_rules(self):
+        r = FakeRunner(self.project, entry={"CARTRADE": "triggered"})
+        self.tick("09:50", r)
+        tr = self.state()["trades"]["CARTRADE"]
+        r.quotes = {"CARTRADE": 2350.0}
+        r.bars = {"CARTRADE": [self.bar("10:05", tr["target"] - 1, tr["stop"] + 1)]}
+        self.tick("10:12", r)
+        self.assertEqual(self.state()["trades"]["CARTRADE"]["status"], "open")
+        r.bars = {}   # alerts.py bars failed: the quote alone decides, as before
+        r.quotes = {"CARTRADE": tr["target"] + 1}
+        self.tick("10:14", r)
+        tr = self.state()["trades"]["CARTRADE"]
+        self.assertEqual((tr["exit_reason"], tr["exit_price"], tr.get("touch_bar")), ("target", tr["target"] + 1, None))
+
+    def test_bar_touch_rules(self):
+        tr = {"entry_time": "09:52", "stop": 100.0, "target": 110.0, "flat_by": "15:10"}
+        b = lambda hhmm, hi, lo, date=DAY: {"start": "%s %s" % (date, hhmm), "high": hi, "low": lo}
+        self.assertEqual(ap.bar_touch(tr, [b("09:53", 110.0, 105.0)], DAY), ("target", 110.0, "09:53"))  # next minute
+        self.assertEqual(ap.bar_touch(tr, [b("09:52", 111, 99)], DAY), (None, None, None))     # the fill's minute
+        self.assertEqual(ap.bar_touch(tr, [b("09:50", 111, 99)], DAY), (None, None, None))     # before the fill
+        self.assertEqual(ap.bar_touch(dict(tr, flat_by="bad"), [b("15:12", 111, 99)], DAY), (None, None, None))
+        self.assertEqual(ap.bar_touch(dict(tr, stop="abc"), [b("10:00", 111, 99)], DAY), (None, None, None))
+        self.assertEqual(ap.bar_touch(tr, [b("15:10", 111, 99)], DAY), (None, None, None))           # flat-by's job
+        self.assertEqual(ap.bar_touch(tr, [b("10:00", 111, 99, "2026-11-03")], DAY), (None, None, None))
+        self.assertEqual(ap.bar_touch(tr, [b("10:05", 105, 100.0), b("10:00", 110.5, 104)], DAY),
+                         ("target", 110.0, "10:00"))                                                  # earliest first
+        self.assertEqual(ap.bar_touch(tr, [{"start": "%s 10:00" % DAY, "high": None}, b("10:05", 106, 99.9)], DAY),
+                         ("stop", 100.0, "10:05"))                                                    # bad bar skipped
+        self.assertEqual(ap.bar_touch(dict(tr, carried_from="2026-11-03"), [b("10:00", 111, 99)], DAY),
+                         (None, None, None))
+        self.assertEqual(ap.bar_touch(dict(tr, entry_time="bad"), [b("10:00", 111, 99)], DAY), (None, None, None))
+        self.assertEqual(ap.bar_touch(dict(tr, target=None), [b("10:00", 999, 101)], DAY), (None, None, None))
+
     def test_stop_exits_at_the_stop_price(self):
         r = FakeRunner(self.project, entry={"CARTRADE": "triggered"})
         self.tick("09:50", r)
@@ -1163,7 +1247,7 @@ class AutoPaperIntegration(unittest.TestCase):
             return 1, "", "simulated crash"
         if tool in self.OFF:
             args += ["--offline", self.OFF[tool]]
-        if tool == "trader-alerts/alerts.py" and args[0] in ("check", "quote"):
+        if tool == "trader-alerts/alerts.py" and args[0] in ("check", "quote", "bars"):
             args += ["--offline", self.qdir]
         return self.real(tool, args, cwd)
 
@@ -1236,6 +1320,30 @@ class AutoPaperIntegration(unittest.TestCase):
         tr = self.trade()
         self.assertEqual((tr["exit_reason"], tr["exit_price"], tr["gross"]), ("stop", 1163.4, -686.7))
 
+    def test_touch_between_ticks_on_real_bars(self):
+        """RELIANCE's real 5-minute bars with one wick raised to 1,186 in the 10:05 bar: the 10:12 quote is
+        back at 1,176, and the target (1,185.20) still fills, at the target, from the bar's high."""
+        with open(os.path.join(self.FX, "trader-entry", "RELIANCE-2026-10-29-5m.json")) as fh:
+            chart = json.load(fh)
+        res = chart["chart"]["result"][0]
+        with open(os.path.join(self.qdir, "bars-RELIANCE.json"), "w") as fh:
+            json.dump(chart, fh)
+        self.enter()
+        self.quote(1176.0)
+        self.tick("10:12")
+        self.assertEqual(self.trade()["status"], "open")       # the real bars never reach 1,185.20 by then
+        hi = res["indicators"]["quote"][0]["high"]
+        for i, t in enumerate(res["timestamp"]):
+            if (datetime.datetime(1970, 1, 1) + datetime.timedelta(seconds=t) + ap.IST).strftime(
+                    "%Y-%m-%d %H:%M") == "2026-10-29 10:05":
+                hi[i] = 1186.0
+        with open(os.path.join(self.qdir, "bars-RELIANCE.json"), "w") as fh:
+            json.dump(chart, fh)
+        self.tick("10:14")
+        tr = self.trade()
+        self.assertEqual((tr["exit_reason"], tr["exit_price"], tr["touch_bar"], tr["gross"]),
+                         ("target", 1185.2, "10:05", round((1185.2 - 1174.3) * 63, 2)))
+
     def test_flat_by(self):
         self.enter()
         self.quote(1178.0)
@@ -1245,6 +1353,147 @@ class AutoPaperIntegration(unittest.TestCase):
         journal = json.load(open(os.path.join(self.project, "trader", "autopilot", "journal-2026-10-29.json")))
         self.assertEqual(journal["totals"]["closed"], 1)
         self.assertAlmostEqual(journal["totals"]["gross"], round((1178.0 - 1174.3) * 63, 2))
+
+
+class MorningPick(Base):
+    """autopilot.auto_pick: the NIFTY 500's most volatile, ranked by the breakout rule's own history."""
+
+    VOL = [("CARTRADE", 7.8), ("AEGISLOG", 7.5), ("BHEL", 3.9), ("GVT&D", 4.0), ("SWIGGY", 5.8), ("TINY", 6.0),
+           ("RESULT", 5.0)]
+    HIST = {"CARTRADE": {"avg_R": 0.05, "triggered": 30, "target": 8, "stop": 14},
+            "AEGISLOG": {"avg_R": -0.10, "triggered": 31, "target": 6, "stop": 16},
+            "BHEL": {"avg_R": 0.218, "triggered": 33, "target": 9, "stop": 15},
+            "GVT&D": {"avg_R": 0.262, "triggered": 32, "target": 6, "stop": 10},
+            "SWIGGY": {"avg_R": -0.061, "triggered": 32, "target": 7, "stop": 15},
+            "TINY": {"avg_R": 0.9, "triggered": 8, "target": 4, "stop": 2},
+            "RESULT": {"avg_R": 0.5, "triggered": 30, "target": 12, "stop": 10}}
+
+    def setUp(self):
+        super().setUp()
+        self.config({"paper": True, "broker": "angelone",
+                     "autopilot": {"symbols": ["CARTRADE"], "auto_paper": True, "auto_pick": {"top": 3}}})
+
+    def runner(self, **kw):
+        return FakeRunner(self.project, vol=self.VOL, hist=self.HIST,
+                          due=[{"symbol": "RESULT", "date": DAY, "link": "x"}], **kw)
+
+    def test_pick_ranks_by_history_and_drops_results_and_thin_records(self):
+        r = self.runner()
+        self.tick("08:56", r)
+        pick = self.state()["pick"]
+        self.assertEqual(pick["symbols"], ["GVT&D", "BHEL", "CARTRADE"])     # AEGISLOG, SWIGGY under 0.0
+        skip = {x["symbol"]: x["skip"] for x in pick["rows"]}
+        self.assertEqual((skip["RESULT"], skip["TINY"]), ("results today", "only 8 past breakouts"))
+        self.assertIn("under +0.00", skip["SWIGGY"])
+        self.assertTrue(any(n.startswith("Picked for today: GVT&D (+0.26R over 32, ATR 4.0%)") for n in self.notes))
+        hist = [a for t, a in r.calls if t == "trader-timemachine/timemachine.py"][0]
+        self.assertEqual(hist[hist.index("--stop-rule") + 1:hist.index("--stop-rule") + 2], ["or_mid"])
+        self.assertEqual(hist[hist.index("--target-r") + 1], "2")
+        # the pick runs once; news and entries use it
+        self.tick("09:01", r)
+        news = [a for t, a in r.calls if t == "trader-news/news.py" and "--json" not in a][0]
+        self.assertEqual(news[news.index("--tickers") + 1], "GVT&D,BHEL,CARTRADE")
+        self.assertEqual(sum(1 for t, a in r.calls if t == "trader-scanner/scan.py"), 1)
+        self.tick("09:40", r)
+        checked = [a[1] for t, a in r.calls if t == "trader-entry/entry.py"]
+        self.assertEqual(checked, ["GVT&D", "BHEL", "CARTRADE"])
+
+    def test_failed_pick_retries_then_falls_back_to_the_config(self):
+        r = self.runner(scan_code=1)
+        self.tick("08:56", r)
+        self.assertNotIn("pick", self.state())
+        self.assertTrue(any("Morning pick failed" in n for n in self.notes))
+        self.tick("09:00", r)
+        self.assertEqual([a for t, a in r.calls if t == "trader-news/news.py"], [])   # nothing to watch yet
+        self.tick("09:26", r)
+        self.assertEqual(self.state()["pick"]["symbols"], ["CARTRADE"])
+        self.assertTrue(any("watching the configured symbols instead (CARTRADE)" in n for n in self.notes))
+        self.tick("09:40", r)
+        self.assertEqual([a[1] for t, a in r.calls if t == "trader-entry/entry.py"], ["CARTRADE"])
+
+    def test_nothing_cleared(self):
+        self.config({"paper": True, "autopilot": {"auto_pick": {"min_avg_r": 5}}})
+        r = self.runner()
+        self.tick("08:56", r)
+        self.assertEqual(self.state()["pick"]["symbols"], [])
+        self.assertTrue(any(n.startswith("No stock cleared the pick today") for n in self.notes))
+        self.tick("09:40", r)
+        self.assertEqual([a for t, a in r.calls if t == "trader-entry/entry.py"], [])
+
+    def test_an_open_trade_is_watched_even_if_not_picked(self):
+        os.makedirs(os.path.join(self.project, "trader", "state"), exist_ok=True)
+        with open(os.path.join(self.project, "trader", "state", "autopilot-%s.json" % DAY), "w") as fh:
+            json.dump({"date": DAY, "news": True, "done": {"SWIGGY": "triggered"}, "active": None, "alerts": False,
+                       "events": [], "notes": [], "paper": True,
+                       "pick": {"at": "08:56", "symbols": ["BHEL"], "rows": []},
+                       "trades": {"SWIGGY": {"symbol": "SWIGGY", "status": "open", "qty": 10, "entry_price": 178.4,
+                                             "entry_time": "09:35", "stop": 176.43, "target": 182.04}}}, fh)
+        r = self.runner()
+        r.quotes = {"SWIGGY": 179.0}
+        status = self.tick("10:00", r)
+        self.assertIn("(2 symbols)", status)
+
+    def test_pick_settings(self):
+        self.assertIsNone(ap.pick_settings(None))
+        self.assertIsNone(ap.pick_settings({"enabled": False}))
+        self.assertEqual(ap.pick_settings(True)["top"], 4)
+        for bad in ({"top": 0}, {"top": 5, "candidates": 4}, {"index": "nifty50"}, {"min_avg_r": "x"},
+                    {"at": "9am"}, "yes", {"candidates": True}):
+            with self.assertRaises(ap.AutopilotError):
+                ap.pick_settings(bad)
+        s = ap.settings({"autopilot": {"stop": "pct:1.5", "target": "1.5R"}})
+        self.assertEqual(ap.pick_rule(s), (["--stop-rule", "pct", "--stop-pct", "1.5", "--target-r", "1.5",
+                                            "--until", "15:10"], ""))
+        with self.assertRaises(ap.AutopilotError):
+            ap.pick_settings({"at": "09:20", "until": "09:00"})
+
+    def test_scan_args_are_guarded(self):
+        good = ["volatile", "--index", "nifty500", "--top", "20", "--out",
+                os.path.join("trader", "autopilot", "pick-volatile-%s.json" % DAY), "--quiet"]
+        self.assertTrue(ap.scan_args_ok(good))
+        self.assertTrue(ap.scan_args_ok(good + ["--now", "%s 08:56" % DAY]))
+        for bad in (["universe", "--index", "nifty500"], ["daily"], good[:-1],
+                    good[:6] + ["trader/universe.txt", "--quiet"],
+                    good[:6] + [os.path.join("trader", "autopilot", "pick-volatile-../../x.json"), "--quiet"]):
+            self.assertFalse(ap.scan_args_ok(bad), bad)
+        day = ap.Day(self.project, at("08:56"), lambda *a: (0, ""), self.notify)
+        with self.assertRaises(ap.AutopilotError):
+            day.run("trader-scanner/scan.py", "universe", "--index", "nifty500")
+
+    def test_news_failure_is_flagged_and_retry_reuses_the_scan(self):
+        r = self.runner()
+        r.due = []
+        real = r.__call__
+
+        def failing(tool, args, cwd):
+            if tool == "trader-news/news.py" and "--json" in args:
+                r.calls.append((tool, list(args)))
+                return 2, json.dumps({"results_due": [], "items": [], "notes": ["HTTP 429"]})
+            return real(tool, args, cwd)
+        self.tick("08:56", failing)
+        self.assertTrue(any("results days not filtered" in n for n in self.notes))
+        self.assertEqual(self.state()["pick"]["symbols"][0], "RESULT")   # unfiltered, and said so
+        # a retry after a later step failed does not scan the NIFTY 500 again
+        st = self.state()
+        del st["pick"]
+        with open(os.path.join(self.project, "trader", "state", "autopilot-%s.json" % DAY), "w") as fh:
+            json.dump(st, fh)
+        self.tick("08:58", r)
+        self.assertEqual(sum(1 for t, a in r.calls if t == "trader-scanner/scan.py"), 1)
+
+    def test_fallback_list_is_not_the_saved_pick(self):
+        os.makedirs(os.path.join(self.project, "trader", "state"), exist_ok=True)
+        with open(os.path.join(self.project, "trader", "state", "autopilot-%s.json" % DAY), "w") as fh:
+            json.dump({"date": DAY, "news": True, "done": {}, "active": None, "alerts": False, "events": [],
+                       "notes": [], "paper": True,
+                       "trades": {"SWIGGY": {"symbol": "SWIGGY", "status": "open", "qty": 10, "entry_price": 178.4,
+                                             "entry_time": "09:35", "stop": 176.43, "target": 182.04}}}, fh)
+        r = self.runner(scan_code=1)
+        r.quotes = {"SWIGGY": 179.0}
+        self.tick("09:26", r)
+        self.assertEqual(self.state()["pick"]["symbols"], ["CARTRADE"])
+        s = ap.settings({"autopilot": {"stop": "atr:1", "target": "price:200"}})
+        self.assertIn("cannot be replayed", ap.pick_rule(s)[1])
 
 
 class SkillDoc(unittest.TestCase):

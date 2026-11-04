@@ -24,7 +24,7 @@ CFG = {"budget": 100000, "broker": "zerodha", "paper": False, "product": "MIS", 
 BATCH = ["RELIANCE", "TCS", "INFY", "M&M", "360ONE"]
 PLAIN = ("BUY 65 RELIANCE on NSE, market, intraday (MIS), good for today / "
          "stop-loss 1215.40 (SL-M, placed after the entry fills) / "
-         "target 1240.20 (watched by trader-alerts, not a resting order) / "
+         "target 1240.20 (a resting LIMIT order, placed after the stop; when one fills, cancel the other) / "
          "loss about ₹806 if the stop fills at 1215.40 (it can fill worse in a fast market) / "
          "plus about ₹61.17 estimated charges (brokerage, STT, exchange, SEBI, stamp, GST): "
          "max loss about ₹867.17 all in")
@@ -214,6 +214,8 @@ class BrokerCalls(unittest.TestCase):
 
     def test_plain_english(self):
         self.assertEqual(ticket.plain(W()), PLAIN)
+        watched = ticket.canonical(rel(), dict(CFG, target_order="watched"))
+        self.assertIn("target 1240.20 (watched by trader-alerts, not a resting order)", ticket.plain(watched))
         self.assertEqual(ticket.plain(ticket.canonical({"symbol": "TCS", "side": "sell", "qty": "1", "type": "limit",
                                                         "limit_price": "3050", "time_in_force": "day",
                                                         "product": "MIS"})),
@@ -337,7 +339,8 @@ class Flow(unittest.TestCase):
         self.assertIn("READY: trader-risk PASS", text)
         self.assertEqual(json_after(text, "Step 1"), KITE_ENTRY)
         self.assertEqual(json_after(text, "Step 2")["order_type"], "SL-M")
-        self.assertIn("could both fill and leave you short", text)
+        self.assertEqual(json_after(text, "Step 3")["order_type"], "LIMIT")
+        self.assertIn("If both fill first you are short", text)
         self.assertNotIn('"plan"', text)
         self.assertNotIn('"why"', text)
 
@@ -420,7 +423,7 @@ class Flow(unittest.TestCase):
         self.assertIn("SELL 65 shares of RELIANCE on NSE, market order, intraday (MIS), good for today "
                       "(flat by 15:10 IST)", text)
         self.assertIn("replaced 1 earlier proposal", text)
-        self.assertIn("cancels every open stop first (broker id 261019000102)", text)
+        self.assertIn("cancels every open stop and target first (broker id 261019000102)", text)
         self.assertIn("do NOT send the sell", text)
         flat = self.orders_doc()[0]
         self.assertEqual(flat["cancel_stop"]["broker_order_ids"], ["261019000102"])
@@ -832,7 +835,7 @@ class Flow(unittest.TestCase):
         self.assertFalse(os.path.exists(self.pf))
 
     def test_angel_one_ticket(self):
-        self.config(**dict(CFG, broker="angelone"))
+        self.config(**dict(CFG, broker="angelone", target_order="watched"))
         self.pass_risk()
         code, text, _ = run(self.args("show", "--index", "1"))
         self.assertEqual(code, 0)
@@ -859,9 +862,10 @@ class Flow(unittest.TestCase):
         self.assertIn("record --status paper", err)
         code, text, _ = run(self.args("result", "--index", "1", "--status", "paper", "--portfolio", self.pf))
         self.assertEqual(code, 0)
-        self.assertIn("Simulated protective stop at 1215.40", text)
+        self.assertIn("Simulated protective stop at 1215.40 and target at 1240.20", text)
         st = self.state_doc()
-        self.assertEqual([r["status"] for r in st["orders"]], ["approved", "placed", "filled", "stop_placed"])
+        self.assertEqual([r["status"] for r in st["orders"]],
+                         ["approved", "placed", "filled", "stop_placed", "target_placed"])
         self.assertTrue(all(r.get("paper") for r in st["orders"][1:]))
         self.assertEqual(st["orders"][2]["price"], 1227.8)          # the plan's entry
         self.assertEqual(self.portfolio()["cash"], 20193.0)
@@ -958,6 +962,258 @@ class Flow(unittest.TestCase):
                             "--portfolio", self.pf, "--config", self.cfg, "--state", self.state])
         self.assertEqual(code, 1)
         self.assertIn("whole shares", err)
+
+
+class TargetOrders(unittest.TestCase):
+    """The live target: a Robo bracket on Angel One, a resting LIMIT on Zerodha (and on request), or watched."""
+
+    setUp, tearDown, config, orders_doc, fp = Flow.setUp, Flow.tearDown, Flow.config, Flow.orders_doc, Flow.fp
+    pass_risk, args, approve, state_doc, portfolio = (Flow.pass_risk, Flow.args, Flow.approve, Flow.state_doc,
+                                                      Flow.portfolio)
+
+    def edit(self, **plan):
+        with open(self.orders) as fh:
+            doc = json.load(fh)
+        doc["orders"][0]["plan"].update(plan)
+        with open(self.orders, "w") as fh:
+            json.dump(doc, fh)
+
+    def robo(self):
+        """Angel One with the plan's entry dated today: a market Robo goes at that (fresh) entry."""
+        self.config(**dict(CFG, broker="angelone"))
+        self.edit(date=TODAY)
+
+    def placed(self, broker_id="9001", qty="65"):
+        self.pass_risk()
+        self.assertEqual(self.approve("yes")[0], 0)
+        return run(self.args("result", "--index", "1", "--status", "placed", "--broker-id", broker_id,
+                             "--filled-qty", qty, "--filled-price", "1228", "--portfolio", self.pf))
+
+    def test_modes(self):
+        self.assertEqual(W()["target_mode"], "resting")                       # Zerodha's default
+        self.assertEqual(ticket.canonical(rel(), dict(CFG, broker="angelone"))["target_mode"], "robo")
+        self.assertEqual(ticket.canonical(rel(product="CNC"), dict(CFG, broker="angelone"))["target_mode"], "resting")
+        self.assertEqual(ticket.canonical(rel(), dict(CFG, target_order="Watched"))["target_mode"], "watched")
+        with self.assertRaises(ticket.TicketError):
+            ticket.canonical(rel(), dict(CFG, target_order="robo"))            # Zerodha has no Robo
+        with self.assertRaises(ticket.TicketError):
+            ticket.canonical(rel(), dict(CFG, target_order="oco"))
+        no_target = rel()
+        no_target.pop("take_profit_limit_price")
+        self.assertEqual(ticket.canonical(no_target, CFG)["target_mode"], "watched")
+        # the fingerprint covers target_order, the same in trader-risk
+        check = load("trader-risk", "check")
+        a, b = ticket.fingerprint(rel(), CFG), ticket.fingerprint(rel(), dict(CFG, target_order="watched"))
+        self.assertNotEqual(a, b)
+        self.assertEqual(a, ticket.fingerprint(rel(), dict(CFG, target_order="")))
+        self.assertEqual(check.fingerprint(rel(), dict(CFG, target_order="watched")), b)
+
+    def test_robo_ticket_and_flow(self):
+        self.robo()
+        self.pass_risk()
+        code, text, _ = run(self.args("show", "--index", "1"))
+        self.assertEqual(code, 0)
+        self.assertIn("Angel One Robo bracket, LIMIT entry 1227.80", text)
+        robo = json_after(text, "2. place_order")
+        self.assertEqual((robo["variety"], robo["producttype"], robo["ordertype"], robo["price"], robo["quantity"]),
+                         ("ROBO", "BO", "LIMIT", "1227.80", "65"))
+        self.assertEqual((robo["squareoff"], robo["stoploss"]), ("12.40", "12.40"))   # 1240.20 - 1227.80, 1227.80 - 1215.40
+        self.assertNotIn("Step 2", text)
+        self.assertIn("Robo bracket: Angel One holds the target and the stop", text)
+        self.assertEqual(self.approve("yes")[0], 0)
+        code, _, err = run(self.args("result", "--index", "1", "--status", "placed", "--filled-qty", "65",
+                                     "--filled-price", "1227.8", "--portfolio", self.pf))
+        self.assertEqual(code, 1)
+        self.assertIn("needs --broker-id for a Robo bracket", err)
+        code, text, _ = run(self.args("result", "--index", "1", "--status", "placed", "--broker-id", "R1",
+                                      "--filled-qty", "65", "--filled-price", "1227.8", "--portfolio", self.pf))
+        self.assertEqual(code, 0)
+        self.assertIn("no step 2 or 3", text)
+        st = self.state_doc()
+        self.assertEqual([r["status"] for r in st["orders"]][-1], "robo_placed")
+        self.assertEqual(run(self.args("stop", "--index", "1"))[0], 1)
+        code, _, err = run(self.args("target", "--index", "1"))
+        self.assertEqual(code, 1)
+        self.assertIn("Robo bracket", err)
+        # flatten cancels the Robo (variety ROBO), then sells only what is still held
+        run(["flatten", "--symbol", "RELIANCE", "--qty", "65", "--orders", self.orders, "--portfolio", self.pf,
+             "--plan", PLAN_PATH, "--config", self.cfg, "--state", self.state, "--now", "2026-10-19 11:00"])
+        doc = json.load(open(self.orders))
+        self.assertEqual(doc["orders"][0]["cancel_stop"]["robo_ids"], ["R1"])
+        self.pass_risk(kind="exit", at="2026-10-19 11:00")
+        code, text, _ = run(self.args("show", "--index", "1", now="2026-10-19 11:00"))
+        self.assertEqual(json_after(text, "1. cancel_order"), {"variety": "ROBO", "orderid": "R1"})
+        self.assertIn("Send the sell only for the quantity still held", text)
+
+    def test_robo_leg_fill_needs_no_cancel(self):
+        self.robo()
+        self.pass_risk()
+        self.approve("yes")
+        run(self.args("result", "--index", "1", "--status", "placed", "--broker-id", "R1", "--filled-qty", "65",
+                      "--filled-price", "1227.8", "--portfolio", self.pf))
+        code, text, _ = run(["fill", "--symbol", "RELIANCE", "--side", "sell", "--qty", "65", "--price", "1240.2",
+                             "--target-hit", "--portfolio", self.pf, "--config", self.cfg, "--state", self.state,
+                             "--now", "2026-10-19 10:30"])
+        self.assertEqual(code, 0)
+        self.assertIn("Angel cancels the other leg itself", text)
+        self.assertNotIn("cancel_order", text)
+        self.assertEqual(ticket.open_legs(self.state_doc(), "RELIANCE", TODAY, "robo"), [])
+
+    def test_resting_target_flow_on_zerodha(self):
+        code, text, _ = self.placed()
+        self.assertEqual(code, 0)
+        self.assertIn("ticket.py target --index 1", text)
+        code, _, err = run(self.args("target", "--index", "1"))
+        self.assertEqual(code, 1)
+        self.assertIn("protective stop first", err)                     # never a target without the stop
+        self.assertEqual(run(self.args("stop", "--index", "1", "--status", "placed", "--broker-id", "S1"))[0], 0)
+        code, text, _ = run(self.args("target", "--index", "1"))
+        self.assertEqual(code, 0)
+        call = json_after(text, "1. place_order")
+        self.assertEqual((call["order_type"], call["price"], call["transaction_type"], call["quantity"], call["tag"]),
+                         ("LIMIT", 1240.2, "SELL", 65, "dts" + self.fp()[:8] + "tg"))
+        code, _, err = run(self.args("target", "--index", "1", "--status", "placed"))
+        self.assertEqual(code, 1)
+        self.assertIn("needs --broker-id", err)
+        self.assertEqual(run(self.args("target", "--index", "1", "--status", "placed", "--broker-id", "T1"))[0], 0)
+        self.assertEqual(run(self.args("target", "--index", "1"))[0], 1)   # never a second target
+        # the target fills: cancel the stop at once, then the short check
+        code, text, _ = run(["fill", "--symbol", "RELIANCE", "--side", "sell", "--qty", "65", "--price", "1240.2",
+                             "--target-hit", "--portfolio", self.pf, "--config", self.cfg, "--state", self.state,
+                             "--now", "2026-10-19 10:30"])
+        self.assertEqual(code, 0)
+        self.assertIn("NOW cancel the protective stop S1", text)
+        self.assertEqual(json_after(text, "1. cancel_order"), {"variety": "regular", "order_id": "S1"})
+        self.assertIn("NEGATIVE quantity", text)
+        st = self.state_doc()
+        self.assertEqual(ticket.open_legs(st, "RELIANCE", TODAY, "target"), [])
+        self.assertEqual(len(ticket.open_stops(st, "RELIANCE", TODAY)), 1)
+        code, _, _ = run(["cancelled", "--symbol", "RELIANCE", "--broker-id", "S1", "--config", self.cfg,
+                          "--state", self.state, "--now", "2026-10-19 10:31"])
+        self.assertEqual(code, 0)
+        self.assertEqual(ticket.open_stops(self.state_doc(), "RELIANCE", TODAY), [])
+        self.assertEqual(run(["cancelled", "--symbol", "RELIANCE", "--broker-id", "S1", "--config", self.cfg,
+                              "--state", self.state, "--now", "2026-10-19 10:32"])[0], 1)   # nothing open now
+
+    def test_stop_fill_cancels_the_target_and_executed_cancel(self):
+        self.placed()
+        run(self.args("stop", "--index", "1", "--status", "placed", "--broker-id", "S1"))
+        run(self.args("target", "--index", "1", "--status", "placed", "--broker-id", "T1"))
+        code, text, _ = run(["fill", "--symbol", "RELIANCE", "--side", "sell", "--qty", "65", "--price", "1215.4",
+                             "--stop-hit", "--portfolio", self.pf, "--config", self.cfg, "--state", self.state,
+                             "--now", "2026-10-19 10:30"])
+        self.assertIn("NOW cancel the resting target T1", text)
+        code, text, _ = run(["cancelled", "--symbol", "RELIANCE", "--broker-id", "T1", "--failed", "executed",
+                             "--config", self.cfg, "--state", self.state, "--now", "2026-10-19 10:31"])
+        self.assertEqual(code, 1)
+        self.assertIn("you are short", text)
+
+    def test_robo_needs_a_fresh_entry_and_the_right_sides(self):
+        self.config(**dict(CFG, broker="angelone"))           # the fixture's plan entry is undated
+        self.pass_risk()
+        code, text, _ = run(self.args("show", "--index", "1"))
+        self.assertEqual(code, 1)
+        self.assertIn("NOT READY: a Robo bracket goes in as a LIMIT at the plan's entry 1227.80, and that entry "
+                      "is undated", text)
+        self.assertNotIn("place_order", text)
+        self.assertEqual(self.approve("yes")[0], 1)            # nothing is recorded for an order that cannot go
+        self.assertFalse(os.path.exists(self.state))
+        self.edit(date=TODAY, entry_time="9:20 AM")             # 30 minutes old at 9:50
+        self.pass_risk()
+        self.assertIn("older than 15 minutes", run(self.args("show", "--index", "1"))[1])
+        self.edit(entry_time="9:50 AM", entry=1245.0)           # an entry above the target
+        self.pass_risk()
+        self.assertIn("stop below the entry and the target above it", run(self.args("show", "--index", "1"))[1])
+
+    def test_partial_leg_fill_is_refused(self):
+        self.placed()
+        run(self.args("stop", "--index", "1", "--status", "placed", "--broker-id", "S1"))
+        run(self.args("target", "--index", "1", "--status", "placed", "--broker-id", "T1"))
+        code, _, err = run(["fill", "--symbol", "RELIANCE", "--side", "sell", "--qty", "30", "--price", "1240.2",
+                            "--target-hit", "--portfolio", self.pf, "--config", self.cfg, "--state", self.state,
+                            "--now", "2026-10-19 10:30"])
+        self.assertEqual(code, 1)
+        self.assertIn("a partial fill: 30 of the target's 65 shares", err)
+        st = self.state_doc()
+        self.assertEqual((len(ticket.open_stops(st, "RELIANCE", TODAY)),
+                          len(ticket.open_legs(st, "RELIANCE", TODAY, "target"))), (1, 1))
+
+    def test_no_second_target_after_the_first_filled(self):
+        self.placed()
+        run(self.args("stop", "--index", "1", "--status", "placed", "--broker-id", "S1"))
+        run(self.args("target", "--index", "1", "--status", "placed", "--broker-id", "T1"))
+        run(["fill", "--symbol", "RELIANCE", "--side", "sell", "--qty", "65", "--price", "1240.2", "--target-hit",
+             "--portfolio", self.pf, "--config", self.cfg, "--state", self.state, "--now", "2026-10-19 10:30"])
+        code, text, _ = run(self.args("target", "--index", "1"))
+        self.assertEqual(code, 1)
+        self.assertIn("target_filled", text)
+        self.assertNotIn("place_order", text)
+
+    def test_target_needs_this_orders_own_live_stop(self):
+        os.makedirs(os.path.dirname(self.state), exist_ok=True)
+        with open(self.state, "w") as fh:     # a leftover stop from another order, and a paper one
+            json.dump({"orders": [{"at": "2026-10-19T09:20:00+05:30", "date": TODAY, "symbol": "RELIANCE",
+                                   "status": "stop_placed", "broker_order_id": "OLD1", "fingerprint": "x" * 64},
+                                  {"at": "2026-10-19T09:21:00+05:30", "date": TODAY, "symbol": "RELIANCE",
+                                   "status": "stop_placed", "broker_order_id": "paper-1", "paper": True,
+                                   "fingerprint": self.fp()}]}, fh)
+        self.placed()
+        code, _, err = run(self.args("target", "--index", "1"))
+        self.assertEqual(code, 1)
+        self.assertIn("this order's protective stop first", err)
+
+    def test_paper_fill_cancels_the_simulated_other_leg_in_the_log(self):
+        self.config(**dict(CFG, paper=True))
+        self.pass_risk()
+        self.approve("yes")
+        run(self.args("result", "--index", "1", "--status", "paper", "--portfolio", self.pf))
+        code, text, _ = run(["fill", "--symbol", "RELIANCE", "--side", "sell", "--qty", "65", "--price", "1240.2",
+                             "--target-hit", "--portfolio", self.pf, "--config", self.cfg, "--state", self.state,
+                             "--now", "2026-10-19 10:30"])
+        self.assertEqual(code, 0)
+        st = self.state_doc()
+        self.assertEqual((ticket.open_stops(st, "RELIANCE", TODAY), ticket.open_legs(st, "RELIANCE", TODAY, "target")),
+                         ([], []))
+        self.assertNotIn("cancel_order", text)
+
+    def test_failed_robo_flatten_warns_and_can_restop(self):
+        self.robo()
+        self.pass_risk()
+        self.approve("yes")
+        run(self.args("result", "--index", "1", "--status", "placed", "--broker-id", "R1", "--filled-qty", "65",
+                      "--filled-price", "1227.8", "--portfolio", self.pf))
+        run(["flatten", "--symbol", "RELIANCE", "--qty", "65", "--orders", self.orders, "--portfolio", self.pf,
+             "--plan", PLAN_PATH, "--config", self.cfg, "--state", self.state, "--now", "2026-10-19 11:00"])
+        self.pass_risk(kind="exit", at="2026-10-19 11:00")
+        self.approve("yes", now="2026-10-19 11:00")
+        code, text, _ = run(self.args("result", "--index", "1", "--cancelled", "R1", "--status", "failed",
+                                      now="2026-10-19 11:00"))
+        self.assertIn("NO STOP AT THE EXCHANGE", text)
+        self.assertIn("Check get_positions first", text)
+        code, _, err = run(self.args("result", "--index", "1", "--restop-id", "RS1", now="2026-10-19 11:01"))
+        self.assertEqual(code, 0, err)
+
+    def test_flatten_cancels_stop_and_target_with_the_right_variety(self):
+        self.config(**dict(CFG, broker="angelone", target_order="resting"))
+        self.placed()
+        run(self.args("stop", "--index", "1", "--status", "placed", "--broker-id", "S1"))
+        run(self.args("target", "--index", "1", "--status", "placed", "--broker-id", "T1"))
+        run(["flatten", "--symbol", "RELIANCE", "--qty", "65", "--orders", self.orders, "--portfolio", self.pf,
+             "--plan", PLAN_PATH, "--config", self.cfg, "--state", self.state, "--now", "2026-10-19 11:00"])
+        cs = json.load(open(self.orders))["orders"][0]["cancel_stop"]
+        self.assertEqual((cs["broker_order_ids"], cs["target_ids"]), (["S1", "T1"], ["T1"]))
+        self.pass_risk(kind="exit", at="2026-10-19 11:00")
+        code, text, _ = run(self.args("show", "--index", "1", now="2026-10-19 11:00"))
+        self.assertEqual(json_after(text, "1. cancel_order"), {"variety": "STOPLOSS", "orderid": "S1"})
+        self.assertEqual(json_after(text, "2. cancel_order"), {"variety": "NORMAL", "orderid": "T1"})
+        self.assertEqual(self.approve("yes", now="2026-10-19 11:00")[0], 0)
+        code, _, _ = run(self.args("result", "--index", "1", "--status", "placed", "--broker-id", "X9",
+                                   "--cancelled", "S1", "--cancelled", "T1", "--filled-qty", "65",
+                                   "--filled-price", "1230", "--portfolio", self.pf, now="2026-10-19 11:00"))
+        self.assertEqual(code, 0)
+        st = self.state_doc()
+        self.assertEqual((ticket.open_stops(st, "RELIANCE", TODAY), ticket.open_legs(st, "RELIANCE", TODAY, "target")),
+                         ([], []))
 
 
 if __name__ == "__main__":
