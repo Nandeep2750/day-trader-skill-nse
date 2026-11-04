@@ -50,7 +50,17 @@ class Ticks(unittest.TestCase):
         for price, tick in ((12.34, "0.01"), (249.99, "0.01"), (250, "0.05"), (999.95, "0.05"), (1000, "0.10"),
                             (4999.9, "0.10"), (5000, "0.50"), (9999.5, "0.50"), (10000, "1.00"),
                             (19999, "1.00"), (20000, "5.00"), (145000, "5.00")):
+            self.assertEqual(exitp.band_tick(price), Decimal(tick), price)
+
+    def test_the_coarser_tick_near_a_band_edge(self):
+        # NSE fixes a stock's tick from last month's close: within 10% of an edge either band is possible
+        for price, tick in ((224.99, "0.01"), (225, "0.05"), (249.99, "0.05"), (275, "0.05"), (275.01, "0.05"),
+                            (899.95, "0.05"), (900, "0.10"), (999.95, "0.10"), (1100, "0.10"), (1174.3, "0.10"),
+                            (4500, "0.50"), (5500, "0.50"), (4499.9, "0.10"), (9000, "1.00"), (11000, "1.00"),
+                            (18000, "5.00"), (22000, "5.00"), (23456, "5.00")):
             self.assertEqual(exitp.tick_of(price), Decimal(tick), price)
+        self.assertEqual(exitp.tick_up("241.03"), Decimal("241.05"))
+        self.assertEqual(exitp.tick_down("991.27"), Decimal("991.20"))
 
     def test_rounding_never_grows_the_risk(self):
         self.assertEqual(exitp.tick_up("1163.35"), Decimal("1163.40"))

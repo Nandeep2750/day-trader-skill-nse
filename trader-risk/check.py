@@ -26,11 +26,14 @@ What blocks an order (every order):
                 time_in_force other than day; an exchange other than NSE; a
                 product other than MIS or CNC; a price off NSE's tick (0.01
                 under Rs 250, 0.05 to Rs 1,000, 0.10 to Rs 5,000, 0.50 to
-                Rs 10,000, 1.00 to Rs 20,000, 5.00 above); a bracket that
-                misses its stop or target
+                Rs 10,000, 1.00 to Rs 20,000, 5.00 above; within 10% of a band
+                edge only the coarser tick, because NSE sets each stock's
+                tick from last month's close); a bracket that misses its stop
+                or target. Case does not matter ("LIMIT" is "limit")
   asset         anything that is not a plain NSE symbol (RELIANCE, M&M,
                 BAJAJ-AUTO): no .BO, no .NS suffix, no options or futures
-  short         selling more than you hold, unless "allow_short": true
+  short         selling more than you hold. Short selling is not supported end
+                to end yet, so this blocks even with "allow_short": true
 
 What blocks an entry (on top):
 
@@ -44,10 +47,18 @@ What blocks an entry (on top):
                 intraday margin: then it needs only mis_margin_pct (20) of its
                 value in cash
   duplicate     the same symbol and side twice in this batch, or already
-                placed today (trader/state/broker.json)
+                placed (or approved and not yet resolved) today
+                (trader/state/broker.json)
   daily limit   max_orders_per_day orders placed today
   stop          no stop while "require_stop": true (a bracket stop_loss_stop_price
-                or the order's plan stop); a stop on the wrong side of the entry
+                or the order's plan stop); a stop on the wrong side of the entry;
+                a fresh price already at or through the stop; on a live
+                account ("paper": false), a stop that is only in the plan
+                (no exchange stop: use a bracket order)
+  price         a market entry with neither a fresh price (under 15 minutes)
+                nor a fresh plan entry: a plan's entry counts only while it is
+                under 15 minutes old, timed by the OLDER of the plan's
+                created_at and its date and entry_time
   loss          qty x (entry - stop), plus the estimated round-trip charges
                 (brokerage, STT, NSE, SEBI, stamp, GST; "include_charges"),
                 over max_loss_per_trade_inr. The entry is the limit price for a
@@ -59,16 +70,25 @@ What blocks an entry (on top):
                 entries plus this one over max_daily_loss_inr (win or lose,
                 each counts in full)
   trades        max_trades_per_day entries already placed today
-  window        before no_entries_before or after no_entries_after (IST),
-                or the market is closed (weekend, NSE holiday, outside 9:15
-                to 15:30)
+  window        the market is closed (weekend, NSE holiday, outside 9:15 to
+                15:30), always, even with the bounds blank; or before
+                no_entries_before or after no_entries_after (IST)
 
 Warnings, not blocks: a flat_by later than your broker's MIS auto square-off
 (Zerodha 15:20, Angel One 15:15), a live account, a stop in the plan only.
 
 Exit code 0 when every order passes, 1 when any order is blocked.
-The verdicts go to trader/state/risk.json with a fingerprint of each order,
-so trader-broker only shows an order as ready if THIS exact order passed today.
+The verdicts go to trader/state/risk.json with a fingerprint of each order
+(its fields, its plan's entry, stop and target, the stop it cancels, and the
+config's product, broker and paper flag), the time it was checked and the
+all-in max loss, so trader-broker only shows an order as ready if THIS exact
+order passed today, under this config, a few minutes ago.
+Today's entries, trades and daily loss count orders placed today and orders
+approved but not yet resolved, leaving out the order's own records (by
+fingerprint), so re-checking an approved order does not block it as its own
+duplicate. A logged entry with no max loss counts as a full
+max_loss_per_trade_inr. The account is live only when "paper" is literally
+false.
 Education and tooling, not financial advice.
 """
 
@@ -102,12 +122,18 @@ NSE_SYMBOL = re.compile(r"^[A-Z0-9][A-Z0-9&\-]{0,19}$")
 HHMM = re.compile(r"^([01]?\d|2[0-3]):([0-5]\d)$")
 CENT = 0.005
 FRESH_MINUTES = 15
+ENTRY_STATUSES = ("approved", "declined", "placed", "denied", "failed")
 REF_WORDS = {"plan": "the plan's entry", "price": "the latest price", "limit": "the limit price",
              "stale price": "an old price"}
 SQUARE_OFF = {"zerodha": ("Zerodha", datetime.time(15, 20)), "angelone": ("Angel One", datetime.time(15, 15))}
 
 # NSE cash tick sizes in paise: a price below X rupees moves in steps of this many paise
 TICKS = ((250, 1), (1000, 5), (5000, 10), (10000, 50), (20000, 100), (None, 500))
+# NSE fixes each stock's tick from the previous month's close, which this pack does not know. Within
+# 10% of a band edge the stock could sit in either band, so only the coarser tick is safe there (a
+# price on the coarser tick is also on the finer one).
+BAND_EDGES = (250, 1000, 5000, 10000, 20000)
+EDGE_ZONE = 0.10
 
 # NSE equity intraday charges (estimates; "charges" in the config overrides any of them)
 CHARGES = {
@@ -209,12 +235,33 @@ def hhmm(value, key):
     return datetime.time(int(m.group(1)), int(m.group(2)))
 
 
+def plan_time(plan):
+    """When a plan's entry price is from, as naive UTC: the OLDER of its created_at and its date and
+    entry_time (IST, "9:40 AM" or "09:40"). The entry bar's time is the price's time; a plan written
+    later from an older trigger is no fresher than the trigger. None when the plan says neither."""
+    times = [t for t in (parse_utc(plan.get("created_at")), _entry_bar_time(plan)) if t]
+    return min(times) if times else None
+
+
+def _entry_bar_time(plan):
+    """A plan's date and entry_time as naive UTC, or None."""
+    m = re.match(r"^\s*(\d{1,2}):(\d{2})\s*([AaPp][Mm])?\s*$", str(plan.get("entry_time") or ""))
+    if not m or not re.match(r"^\d{4}-\d{2}-\d{2}$", str(plan.get("date") or "")):
+        return None
+    h, mi = int(m.group(1)), int(m.group(2))
+    if m.group(3):
+        h = h % 12 + (12 if m.group(3).lower() == "pm" else 0)
+    if h > 23 or mi > 59:
+        return None
+    d = datetime.date.fromisoformat(plan["date"])
+    return ist_to_utc(datetime.datetime.combine(d, datetime.time(h, mi)))
+
+
 def window_check(now_ist, c):
-    """Reasons an entry cannot be placed now (IST). Empty when the window is off."""
+    """Reasons an entry cannot be placed now (IST). NSE must be open (a trading day, 9:15 to 15:30)
+    whatever the config says; no_entries_before / no_entries_after narrow that further when set."""
     before = hhmm(c.get("no_entries_before"), "no_entries_before")
     after = hhmm(c.get("no_entries_after"), "no_entries_after")
-    if before is None and after is None:
-        return [], []
     warns = []
     d, t = now_ist.date(), now_ist.time().replace(second=0, microsecond=0)
     if d.year not in CALENDAR_YEARS:
@@ -264,11 +311,58 @@ def read_json(path, what, required=True):
         raise RiskError("%s is not valid JSON: %s" % (path, e))
 
 
-def fingerprint(order):
-    """Same function in trader-broker/ticket.py: the exact order that was checked."""
-    core = {k: order[k] for k in FINGERPRINT_FIELDS if k in order and order[k] is not None}
-    blob = json.dumps(core, sort_keys=True, separators=(",", ":"))
-    return hashlib.sha256(blob.encode("utf-8")).hexdigest()[:16]
+def _fp_symbol(text):
+    sym = str(text or "").strip().upper()
+    return sym[:-3] if sym.endswith(".NS") else sym
+
+
+def _fp_value(key, value):
+    if value is None:
+        return None
+    if key in ("type", "side", "time_in_force", "order_class"):
+        return str(value).strip().lower()
+    if key in ("product", "exchange"):
+        return str(value).strip().upper()
+    if key == "symbol":
+        return _fp_symbol(value)
+    return str(value).strip() if isinstance(value, str) else str(value)
+
+
+def is_paper(cfg):
+    """Paper unless the config says "paper": false, literally. Keep identical to trader-broker/ticket.py."""
+    return (cfg or {}).get("paper", True) is not False
+
+
+def cancel_ids(order):
+    """The broker ids of the stops an order cancels (a flatten). Keep identical to trader-broker/ticket.py."""
+    cs = order.get("cancel_stop") or {}
+    if not isinstance(cs, dict):
+        return []
+    ids = cs.get("broker_order_ids")
+    if isinstance(ids, (list, tuple)):
+        raw = [str(x) for x in ids if x is not None]
+    else:
+        raw = str(cs.get("broker_order_id") or "").split(",")
+    return [x.strip() for x in raw if x.strip()]
+
+
+def fingerprint(order, cfg=None):
+    """The exact order that was checked, under the config it was checked with.
+
+    Keep identical to trader-broker/ticket.py: an order is READY there only if this hash matches.
+    Config defaults (product MIS, broker zerodha, paper true) apply when the config leaves them out."""
+    c = dict(DEFAULTS)
+    c.update(cfg or {})
+    plan = order.get("plan") if isinstance(order.get("plan"), dict) else None
+    payload = {k: _fp_value(k, order.get(k)) for k in FINGERPRINT_FIELDS}
+    payload["plan"] = ({"entry": plan.get("entry"), "stop": plan.get("stop"), "target": plan.get("target")}
+                       if plan is not None else None)
+    payload["cancel_stop"] = sorted(cancel_ids(order)) or None
+    payload["product_resolved"] = str(order.get("product") or c.get("product") or "MIS").strip().upper()
+    payload["broker"] = str(c.get("broker") or "zerodha").strip().lower()
+    payload["paper"] = is_paper(c)
+    blob = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(blob.encode("utf-8")).hexdigest()
 
 
 def _f(x):
@@ -283,8 +377,8 @@ def paise(x):
     return int(math.floor(float(x) * 100 + 0.5 + 1e-9))
 
 
-def tick_paise(price):
-    """NSE's tick, in paise, for a price in rupees."""
+def band_tick_paise(price):
+    """NSE's tick, in paise, for the band a price is in."""
     p = paise(price)
     for below, tick in TICKS:
         if below is None or p < below * 100:
@@ -292,13 +386,27 @@ def tick_paise(price):
     return TICKS[-1][1]
 
 
+def tick_paise(price):
+    """The safe tick, in paise: the band's tick, or the coarser one within 10% of a band edge."""
+    t = band_tick_paise(price)
+    p = float(price)
+    for edge in BAND_EDGES:
+        if edge * (1 - EDGE_ZONE) <= p <= edge * (1 + EDGE_ZONE):
+            t = max(t, band_tick_paise(edge))
+    return t
+
+
 def tick_hint(price):
-    """"1163.35" -> (False, "the 0.10 tick for this price: 1163.30 or 1163.40"); on tick -> (True, "")."""
+    """"1163.35" -> (False, "NSE's 0.10 tick for this price: 1163.30 or 1163.40"); on tick -> (True, "")."""
     p, t = paise(price), tick_paise(price)
     if p % t == 0:
         return True, ""
     lo = (p // t) * t
-    return False, "NSE's %.2f tick for this price: %.2f or %.2f" % (t / 100.0, lo / 100.0, (lo + t) / 100.0)
+    near = "%.2f or %.2f" % (lo / 100.0, (lo + t) / 100.0)
+    if p % band_tick_paise(price) == 0:
+        return False, "near a tick-band edge: use the coarser %.2f tick (%s), since NSE may have this stock " \
+                      "in either band" % (t / 100.0, near)
+    return False, "NSE's %.2f tick for this price: %s" % (t / 100.0, near)
 
 
 def round_trip_charges(c, buy_value, sell_value):
@@ -396,12 +504,20 @@ def rec_is_entry(rec):
 
 
 def placed_today(state, today):
-    """Orders recorded as placed today by trader-broker."""
-    out = []
-    for rec in (state or {}).get("orders", []):
-        if rec.get("status") == "placed" and rec_day(rec) == today:
-            out.append(rec)
-    return out
+    """Today's entries and exits that count: placed, or approved and not yet resolved.
+
+    trader-broker's log is append-only (approved, then placed / denied / failed for the same
+    fingerprint), so the latest record per fingerprint decides. A yes that has not come back yet
+    still counts toward duplicates, trades, orders and the daily loss."""
+    latest, keys = {}, []
+    for i, rec in enumerate((state or {}).get("orders", [])):
+        if rec_day(rec) != today or rec.get("status") not in ENTRY_STATUSES:
+            continue
+        key = rec.get("fingerprint") or ("#", i)
+        if key not in latest:
+            keys.append(key)
+        latest[key] = rec
+    return [latest[k] for k in keys if latest[k].get("status") in ("placed", "approved")]
 
 
 # ---------------------------------------------------------------- the check
@@ -421,6 +537,7 @@ def check(orders, cfg, portfolio=None, prices=None, state=None, today=None, now=
     prices = {str(k).upper(): float(v) for k, v in (prices or {}).items() if _f(v)}
     now_utc = now or parse_now(None)
     now_ist = to_ist(now_utc)
+    checked_at = now_utc.replace(microsecond=0).strftime("%Y-%m-%dT%H:%M:%SZ")
     today = today or now_ist.date().isoformat()
     acct, top_warn = account(c, portfolio, prices)
     blocked = {str(b).strip().upper() for b in c.get("blocked") or []}
@@ -428,22 +545,36 @@ def check(orders, cfg, portfolio=None, prices=None, state=None, today=None, now=
     with_charges = bool(c.get("include_charges", True))
     margin_pct = float(c.get("mis_margin_pct") or 100)
     done_today = placed_today(state, today)
-    count_today = len(done_today)
-    entries_today = [r for r in done_today if rec_is_entry(r)]
-    loss_today = 0.0
-    for r in entries_today:
-        ml = _f(r.get("max_loss"))
-        if ml is None:
-            top_warn.append("an entry placed today (%s %s) has no max loss in the log; not counted in "
-                            "the daily loss" % (r.get("side"), r.get("symbol")))
-        else:
-            loss_today += ml
-    placed_keys = {(str(r.get("symbol", "")).upper(), r.get("side")) for r in done_today}
+    full_loss = _f(c.get("max_loss_per_trade_inr"))
+
+    def tally(own_fp=None):
+        """Today's (orders, entries, loss at risk, (symbol, side) keys, notes), leaving out this order's
+        own records, so re-checking an approved or placed order does not count it against itself."""
+        recs = [r for r in done_today if own_fp is None or r.get("fingerprint") != own_fp]
+        entries = [r for r in recs if rec_is_entry(r)]
+        loss, notes = 0.0, []
+        for r in entries:
+            ml = _f(r.get("max_loss"))
+            if ml is None and full_loss:
+                loss += full_loss
+                notes.append("an entry today (%s %s) has no max loss in the log; counted as your full %s max "
+                             "loss per trade" % (r.get("side"), r.get("symbol"), inr(full_loss)))
+            elif ml is None:
+                notes.append("an entry today (%s %s) has no max loss in the log; not counted in the daily loss"
+                             % (r.get("side"), r.get("symbol")))
+            else:
+                loss += ml
+        keys = {(str(r.get("symbol", "")).upper(), str(r.get("side", "")).lower()) for r in recs}
+        return len(recs), entries, loss, keys, notes
+
+    day_count, day_entries, day_loss, _, day_notes = tally()
+    top_warn.extend(day_notes)
     win_reasons, win_warns = window_check(now_ist, c)
     seen = set()
     results = []
     batch_entries, batch_loss = 0, 0.0
-    if not c.get("paper", True):
+    paper = is_paper(c)
+    if not paper:
         top_warn.append("LIVE account (\"paper\": false): these orders use real money")
     sq = square_off_warning(c)
     if sq:
@@ -473,6 +604,8 @@ def check(orders, cfg, portfolio=None, prices=None, state=None, today=None, now=
         qty = o.get("qty")
         plan = o.get("plan") if isinstance(o.get("plan"), dict) else {}
         oc = str(o.get("order_class") or "").strip().lower()
+        own_fp = fingerprint(o, c)
+        count_today, entries_today, loss_today, placed_keys, _ = tally(own_fp)
         legs = o.get("take_profit_limit_price") is not None or o.get("stop_loss_stop_price") is not None
         bracket = oc == "bracket" or (not oc and legs)
         value = None
@@ -498,7 +631,7 @@ def check(orders, cfg, portfolio=None, prices=None, state=None, today=None, now=
                 else:
                     ok, hint = tick_hint(v)
                     if not ok:
-                        reasons.append("format: %s %s is off %s (the exchange rejects it)" % (k, _p(v), hint))
+                        reasons.append("format: %s %s is off tick: %s" % (k, _p(v), hint))
         if typ not in TYPES:
             reasons.append("format: order type must be market or limit, got %r" % typ)
         if tif not in TIFS:
@@ -531,6 +664,14 @@ def check(orders, cfg, portfolio=None, prices=None, state=None, today=None, now=
         # the reference price: what one share costs to get in
         plan_entry = _f(plan.get("entry"))
         live = fresh(sym)
+        if plan_entry and typ == "market":
+            pt = plan_time(plan)
+            age = (now_utc - pt).total_seconds() if pt else None
+            if age is None or not -60 <= age <= FRESH_MINUTES * 60:
+                warns.append("the plan's entry %s is %s: not used for a market order (older than %d minutes)"
+                             % (_p(plan_entry), ("from %s IST" % to_ist(pt).strftime("%Y-%m-%d %H:%M"))
+                                if pt else "undated", FRESH_MINUTES))
+                plan_entry = None
         ref, ref_from = None, None
         if typ == "limit":
             ref, ref_from = _f(o.get("limit_price")), "limit"
@@ -559,7 +700,11 @@ def check(orders, cfg, portfolio=None, prices=None, state=None, today=None, now=
         elif side == "buy" and held < -1e-9 and q is not None:
             exiting = q <= -held + 1e-9
         kind = "exit" if exiting else "entry"
-        if kind == "entry" and value is None and q:
+        if kind == "entry" and typ == "market" and not plan_entry and live is None:
+            later.append("price: a market entry needs a fresh price (under %d minutes old) or a plan entry to "
+                         "measure its risk, and %s has neither (trader-alerts: alerts.py quote %s --write)"
+                         % (FRESH_MINUTES, sym, sym))
+        elif kind == "entry" and value is None and q:
             later.append("price: no price for %s to size a %s-share order; add it to "
                          "trader/prices.json (trader-alerts: alerts.py quote %s --write)" % (sym, qty, sym))
 
@@ -607,9 +752,10 @@ def check(orders, cfg, portfolio=None, prices=None, state=None, today=None, now=
                                 _pct(c["max_position_pct"])))
         if side == "sell" and sym and kind == "entry":
             over = q > held + 1e-9 if q is not None else held <= 0
-            if over and not c.get("allow_short"):
-                reasons.append("short: selling more %s than you hold (%s shares); short selling is off. "
-                               "If you bought it, record the fill first (ticket.py fill)" % (sym, _num(held)))
+            if over:
+                reasons.append("short: selling more %s than you hold (%s shares). Short selling is not supported "
+                               "end to end yet, so it is blocked even with \"allow_short\": true. If you bought "
+                               "it, record the fill first (ticket.py fill)" % (sym, _num(held)))
 
         # day-trade checks: stop, loss, reward:risk, daily loss, trades, window
         max_loss = risk_ps = rr = stop = target = charges = loss_at_stop = None
@@ -622,14 +768,22 @@ def check(orders, cfg, portfolio=None, prices=None, state=None, today=None, now=
                 warns.append("the bracket stop %s differs from the plan's stop %s: the bracket's is the one "
                              "trader-broker places" % (_p(leg_stop), _p(plan_stop)))
             if stop and not leg_stop:
-                warns.append("the stop %s is in the plan only, not at the broker: set a stop alert "
-                             "(trader-alerts: alerts.py add --from-plan)" % _p(stop))
+                if paper:
+                    warns.append("the stop %s is in the plan only, not at the broker: set a stop alert "
+                                 "(trader-alerts: alerts.py add --from-plan)" % _p(stop))
+                else:
+                    later.append("stop: no exchange stop: the stop %s is in the plan only. A live entry needs a "
+                                 "bracket order (stop_loss_stop_price) so trader-broker places the stop at the "
+                                 "broker" % _p(stop))
             if not stop:
                 if c.get("require_stop", True):
                     later.append("stop: no stop. Every entry needs one (\"require_stop\": true): a bracket "
                                  "stop_loss_stop_price, from trader-exit and trader-budget")
                 else:
                     warns.append("no stop: the max loss is not capped, so it is not counted in the daily loss")
+            elif live is not None and ((long and live <= stop + 1e-9) or (not long and live >= stop - 1e-9)):
+                later.append("stop: the price is already through the stop: %s last %s is at or %s the stop %s"
+                             % (sym, _p(live), "below" if long else "above", _p(stop)))
             elif ref:
                 if (long and stop >= ref - CENT) or (not long and stop <= ref + CENT):
                     later.append("stop: the stop %s must be %s the entry %s for a %s"
@@ -733,22 +887,23 @@ def check(orders, cfg, portfolio=None, prices=None, state=None, today=None, now=
             "value_inr": round(value, 2) if value is not None else None,
             "entry_ref": round(ref, 2) if ref else None, "entry_ref_from": ref_from,
             "stop": stop, "target": target, "risk_per_share": risk_ps, "loss_at_stop": loss_at_stop,
-            "charges": charges, "max_loss": max_loss, "reward_risk": rr, "fingerprint": fingerprint(o),
+            "charges": charges, "max_loss": max_loss, "reward_risk": rr, "fingerprint": own_fp,
+            "checked_at": checked_at,
             "verdict": verdict, "reasons": reasons, "warnings": warns, "info": info,
         })
 
     return {
         "date": today,
         "now_ist": now_ist.strftime("%Y-%m-%d %H:%M"),
-        "paper": bool(c.get("paper", True)),
+        "paper": paper,
         "broker": str(c.get("broker") or ""),
         "results": results,
         "pass": sum(1 for r in results if r["verdict"] == "PASS"),
         "block": sum(1 for r in results if r["verdict"] == "BLOCK"),
         "warnings": top_warn,
         "cash_after": round(acct["cash"], 2),
-        "today": {"orders_placed": count_today, "entries_placed": len(entries_today),
-                  "loss_at_risk": round(loss_today, 2)},
+        "today": {"orders_placed": day_count, "entries_placed": len(day_entries),
+                  "loss_at_risk": round(day_loss, 2)},
     }
 
 

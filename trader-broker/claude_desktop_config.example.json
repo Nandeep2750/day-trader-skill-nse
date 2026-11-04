@@ -10,7 +10,10 @@
     },
     "angel-one": {
       "command": "npx",
-      "args": ["-y", "angel-one-mcp"],
+      "args": [
+        "-y",
+        "angel-one-mcp"
+      ],
       "env": {
         "ANGEL_API_KEY": "YOUR_SMARTAPI_KEY_TYPED_HERE_NEVER_IN_CHAT",
         "ANGEL_CLIENT_ID": "YOUR_CLIENT_ID_TYPED_HERE_NEVER_IN_CHAT",

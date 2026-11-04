@@ -12,9 +12,11 @@ It never places an order.
 
 NSE cash market, prices in rupees. Every price the plan writes sits on the
 NSE tick for its price band (price below 250: 0.01; below 1,000: 0.05; below
-5,000: 0.10; below 10,000: 0.50; below 20,000: 1.00; above: 5.00. NSE reviews
-the bands monthly), rounded so the risk never grows: a long's stop rounds UP
-to the tick (toward the entry), its target rounds DOWN.
+5,000: 0.10; below 10,000: 0.50; below 20,000: 1.00; above: 5.00), rounded so
+the risk never grows: a long's stop rounds UP to the tick (toward the entry),
+its target rounds DOWN. NSE sets each stock's tick from last month's close, so
+within 10% of a band edge (225 to 275, 900 to 1,100, 4,500 to 5,500, 9,000 to
+11,000, 18,000 to 22,000) the coarser tick is used: it is valid in either band.
 
 Stops:
   or-mid     the opening-range midpoint (the default for an orb entry)
@@ -67,6 +69,11 @@ DEFAULTS = {"flat_by": "15:10", "min_reward_risk": 1.0, "broker": None}
 SQUARE_OFF = {"zerodha": ("Zerodha", "15:20"), "angelone": ("Angel One", "15:15")}   # MIS auto square-off
 NSE_SYMBOL = re.compile(r"^[A-Z0-9][A-Z0-9&\-]{0,19}$")
 TICKS = ((250, "0.01"), (1000, "0.05"), (5000, "0.10"), (10000, "0.50"), (20000, "1.00"), (None, "5.00"))  # price below X -> tick
+# NSE fixes each stock's tick from the previous month's close, which this pack does not know. Within
+# 10% of a band edge the stock could sit in either band, so prices there go on the coarser tick (a
+# price on the coarser tick is also on the finer one).
+BAND_EDGES = (250, 1000, 5000, 10000, 20000)
+EDGE_ZONE = Decimal("0.10")
 ATR_BARS = 14
 MIN_RISK_PCT = Decimal("0.05")     # risk under 0.05% of the price is inside the spread's noise
 CENT = Decimal("0.01")
@@ -206,12 +213,22 @@ def cents(x):
     return D(x).quantize(CENT, rounding=ROUND_HALF_UP)
 
 
-def tick_of(price):
-    """The NSE tick for a price: 0.01 under 250, 0.05 under 1,000 ... 5.00 from 20,000."""
+def band_tick(price):
+    """The NSE band's tick for a price: 0.01 under 250, 0.05 under 1,000 ... 5.00 from 20,000."""
     p = D(price)
     for limit, t in TICKS:
         if limit is None or p < limit:
             return Decimal(t)
+
+
+def tick_of(price):
+    """The safe tick: the band's tick, or the coarser one within 10% of a band edge."""
+    p = D(price)
+    t = band_tick(p)
+    for edge in BAND_EDGES:
+        if edge * (1 - EDGE_ZONE) <= p <= edge * (1 + EDGE_ZONE):
+            t = max(t, band_tick(edge))
+    return t
 
 
 def tick_up(x):

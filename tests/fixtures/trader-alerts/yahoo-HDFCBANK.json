@@ -1,1 +1,102 @@
-{"chart":{"result":[{"meta":{"currency":"INR","symbol":"HDFCBANK.NS","exchangeName":"NSI","fullExchangeName":"NSE","instrumentType":"EQUITY","firstTradeDate":820467900,"regularMarketTime":1793699978,"hasPrePostMarketData":false,"gmtoffset":19800,"timezone":"IST","exchangeTimezoneName":"Asia/Kolkata","regularMarketPrice":725.5,"regularMarketChangePercent":3.643,"fulldayPrice":725.5,"fulldayChange":25.5,"fulldayChangePercent":3.643,"fiftyTwoWeekHigh":1017.5,"fiftyTwoWeekLow":669.2,"regularMarketDayHigh":725.8,"regularMarketDayLow":706.05,"regularMarketVolume":42738372,"longName":"HDFC Bank Limited","shortName":"HDFC BANK LTD","chartPreviousClose":700.0,"priceHint":2,"currentTradingPeriod":{"pre":{"timezone":"IST","end":1793677500,"start":1793677500,"gmtoffset":19800},"regular":{"timezone":"IST","end":1793700000,"start":1793677500,"gmtoffset":19800},"post":{"timezone":"IST","end":1793700000,"start":1793700000,"gmtoffset":19800}},"dataGranularity":"1d","range":"1d","validRanges":["1d","5d","1mo","3mo","6mo","1y","2y","5y","10y","ytd","max"]},"timestamp":[1793699978],"indicators":{"quote":[{"volume":[42738372],"low":[706.0499877929688],"high":[725.7999877929688],"close":[725.5],"open":[708.0]}],"adjclose":[{"adjclose":[725.5]}]}}],"error":null}}
+{
+  "chart": {
+    "result": [
+      {
+        "meta": {
+          "currency": "INR",
+          "symbol": "HDFCBANK.NS",
+          "exchangeName": "NSI",
+          "fullExchangeName": "NSE",
+          "instrumentType": "EQUITY",
+          "firstTradeDate": 820467900,
+          "regularMarketTime": 1793699978,
+          "hasPrePostMarketData": false,
+          "gmtoffset": 19800,
+          "timezone": "IST",
+          "exchangeTimezoneName": "Asia/Kolkata",
+          "regularMarketPrice": 725.5,
+          "regularMarketChangePercent": 3.643,
+          "fulldayPrice": 725.5,
+          "fulldayChange": 25.5,
+          "fulldayChangePercent": 3.643,
+          "fiftyTwoWeekHigh": 1017.5,
+          "fiftyTwoWeekLow": 669.2,
+          "regularMarketDayHigh": 725.8,
+          "regularMarketDayLow": 706.05,
+          "regularMarketVolume": 42738372,
+          "longName": "HDFC Bank Limited",
+          "shortName": "HDFC BANK LTD",
+          "chartPreviousClose": 700.0,
+          "priceHint": 2,
+          "currentTradingPeriod": {
+            "pre": {
+              "timezone": "IST",
+              "end": 1793677500,
+              "start": 1793677500,
+              "gmtoffset": 19800
+            },
+            "regular": {
+              "timezone": "IST",
+              "end": 1793700000,
+              "start": 1793677500,
+              "gmtoffset": 19800
+            },
+            "post": {
+              "timezone": "IST",
+              "end": 1793700000,
+              "start": 1793700000,
+              "gmtoffset": 19800
+            }
+          },
+          "dataGranularity": "1d",
+          "range": "1d",
+          "validRanges": [
+            "1d",
+            "5d",
+            "1mo",
+            "3mo",
+            "6mo",
+            "1y",
+            "2y",
+            "5y",
+            "10y",
+            "ytd",
+            "max"
+          ]
+        },
+        "timestamp": [
+          1793699978
+        ],
+        "indicators": {
+          "quote": [
+            {
+              "volume": [
+                42738372
+              ],
+              "low": [
+                706.0499877929688
+              ],
+              "high": [
+                725.7999877929688
+              ],
+              "close": [
+                725.5
+              ],
+              "open": [
+                708.0
+              ]
+            }
+          ],
+          "adjclose": [
+            {
+              "adjclose": [
+                725.5
+              ]
+            }
+          ]
+        }
+      }
+    ],
+    "error": null
+  }
+}

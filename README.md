@@ -1,6 +1,6 @@
 # The Day Trader skill, NSE edition
 
-9 Claude skills for day trading on NSE: scan thousands of charts, track breaking news, time every entry and exit, and replay every outcome before you risk a rupee.
+10 Claude skills for day trading on NSE: scan thousands of charts, track breaking news, time every entry and exit, and replay every outcome before you risk a rupee.
 
 A port of [github.com/Jakeschincariol/day-trader-skill](https://github.com/Jakeschincariol/day-trader-skill)
 (MIT) from the US market to the National Stock Exchange of India: IST, the NSE
@@ -35,11 +35,11 @@ cp -r day-trader-skill-nse/trader-* ~/.claude/skills/
 
 The tools need Python 3.8 or newer. Nothing to pip install.
 
-## The nine
+## The ten
 
 | command | job | what it does |
 | --- | --- | --- |
-| `/trader-scanner` | Chart Scanner | Scans the NSE EQ universe (or NIFTY 500) for setups: opening-range breakouts, flags, oversold bounces. |
+| `/trader-scanner` | Chart Scanner | Scans the NSE EQ universe (or NIFTY 500) for setups: opening-range breakouts, flags, oversold bounces, and the most volatile liquid stocks (ATR %). |
 | `/trader-news` | News Monitor | Yahoo headlines plus NSE corporate announcements and board meetings; flags results due this week. |
 | `/trader-entry` | Entry Timer | Watches a setup bar by bar and tells you the moment to get in. |
 | `/trader-exit` | Exit Planner | Sets your stop and target on the NSE tick before you enter, and the flat-by time. |
@@ -48,6 +48,7 @@ The tools need Python 3.8 or newer. Nothing to pip install.
 | `/trader-budget` | Budget Manager | Sizes every position to your budget and max loss, charges included. |
 | `/trader-broker` | Order Executor | Zerodha or Angel One tickets, paper by default, never without your yes. |
 | `/trader-alerts` | Price Alerts | Rings on the stop, the target, flat-by and before your broker's auto square-off. |
+| `/trader-autopilot` | Paper Autopilot | Runs news, entry checks, plan, sizing, risk and alerts every 2 minutes on a Mac (launchd); stops at the ticket for your yes. |
 
 Dropped from the original: `trader-analyst` (read SEC EDGAR filings) and
 `trader-pelosi` (read US House trade disclosures). Neither has an NSE source
@@ -62,6 +63,7 @@ what the last one wrote:
 scanner -> news -> entry -> exit -> timemachine -> budget -> risk -> broker   (one trade)
 alerts: stop, target, flat by 15:10, square-off warning                        (while it is open)
 news                                                                           (daily, on a schedule)
+autopilot: all of the above every 2 minutes on a Mac, stopping at your yes    (paper)
 ```
 
 An example on real data: RELIANCE, Thursday October 29 2026.
@@ -122,6 +124,7 @@ python3 trader-scanner/scan.py universe                                # NSE EQ 
 python3 trader-scanner/scan.py universe --index nifty500               # or the NIFTY 500
 python3 trader-scanner/scan.py daily                                   # pre-open setups
 python3 trader-scanner/scan.py orb --at 09:45                          # opening-range breakouts so far
+python3 trader-scanner/scan.py volatile --index nifty500 --top 15      # most volatile liquid stocks (ATR %)
 python3 trader-news/news.py --tickers RELIANCE,INFY --hours 12         # headlines, NSE filings, results due
 python3 trader-entry/entry.py check RELIANCE --setup orb --write       # waiting / triggered / expired
 python3 trader-exit/exit.py plan --from trader/entry.json --stop or-mid --target 1R --write
@@ -131,6 +134,8 @@ python3 trader-risk/check.py                                           # PASS / 
 python3 trader-broker/ticket.py show                                   # the tickets, READY or not
 python3 trader-alerts/alerts.py add --from-plan                        # stop, target, flat-by, square-off
 python3 trader-alerts/alerts.py check                                  # rings what hit, once
+python3 trader-autopilot/autopilot.py install --project ~/paper-test   # writes a launchd plist, prints the command to load it
+python3 trader-autopilot/autopilot.py status                           # what the autopilot did today
 ```
 
 `--now "2026-10-29 09:40"` pins any tool's clock (IST). Config lives in
@@ -202,6 +207,7 @@ trader-risk/        SKILL.md, check.py
 trader-budget/      SKILL.md, size.py, config.example.json, targets.example.json
 trader-broker/      SKILL.md, ticket.py, claude_desktop_config.example.json, mcp.example.json
 trader-alerts/      SKILL.md, alerts.py, alerts.example.json
+trader-autopilot/   SKILL.md, autopilot.py
 tests/              unittest suite + offline fixtures
 ```
 

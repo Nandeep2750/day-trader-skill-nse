@@ -1,1 +1,102 @@
-{"chart":{"result":[{"meta":{"currency":"INR","symbol":"INFY.NS","exchangeName":"NSI","fullExchangeName":"NSE","instrumentType":"EQUITY","firstTradeDate":820467900,"regularMarketTime":1793699979,"hasPrePostMarketData":false,"gmtoffset":19800,"timezone":"IST","exchangeTimezoneName":"Asia/Kolkata","regularMarketPrice":1148.1,"regularMarketChangePercent":-1.111,"fulldayPrice":1148.1,"fulldayChange":-12.9,"fulldayChangePercent":-1.111,"fiftyTwoWeekHigh":1728.0,"fiftyTwoWeekLow":980.4,"regularMarketDayHigh":1162.0,"regularMarketDayLow":1133.5,"regularMarketVolume":10494010,"longName":"Infosys Limited","shortName":"INFOSYS LIMITED","chartPreviousClose":1161.0,"priceHint":2,"currentTradingPeriod":{"pre":{"timezone":"IST","start":1793677500,"end":1793677500,"gmtoffset":19800},"regular":{"timezone":"IST","start":1793677500,"end":1793700000,"gmtoffset":19800},"post":{"timezone":"IST","start":1793700000,"end":1793700000,"gmtoffset":19800}},"dataGranularity":"1d","range":"1d","validRanges":["1d","5d","1mo","3mo","6mo","1y","2y","5y","10y","ytd","max"]},"timestamp":[1793699979],"indicators":{"quote":[{"low":[1133.5],"open":[1155.699951171875],"volume":[10494010],"close":[1148.0999755859375],"high":[1162.0]}],"adjclose":[{"adjclose":[1148.0999755859375]}]}}],"error":null}}
+{
+  "chart": {
+    "result": [
+      {
+        "meta": {
+          "currency": "INR",
+          "symbol": "INFY.NS",
+          "exchangeName": "NSI",
+          "fullExchangeName": "NSE",
+          "instrumentType": "EQUITY",
+          "firstTradeDate": 820467900,
+          "regularMarketTime": 1793699979,
+          "hasPrePostMarketData": false,
+          "gmtoffset": 19800,
+          "timezone": "IST",
+          "exchangeTimezoneName": "Asia/Kolkata",
+          "regularMarketPrice": 1148.1,
+          "regularMarketChangePercent": -1.111,
+          "fulldayPrice": 1148.1,
+          "fulldayChange": -12.9,
+          "fulldayChangePercent": -1.111,
+          "fiftyTwoWeekHigh": 1728.0,
+          "fiftyTwoWeekLow": 980.4,
+          "regularMarketDayHigh": 1162.0,
+          "regularMarketDayLow": 1133.5,
+          "regularMarketVolume": 10494010,
+          "longName": "Infosys Limited",
+          "shortName": "INFOSYS LIMITED",
+          "chartPreviousClose": 1161.0,
+          "priceHint": 2,
+          "currentTradingPeriod": {
+            "pre": {
+              "timezone": "IST",
+              "start": 1793677500,
+              "end": 1793677500,
+              "gmtoffset": 19800
+            },
+            "regular": {
+              "timezone": "IST",
+              "start": 1793677500,
+              "end": 1793700000,
+              "gmtoffset": 19800
+            },
+            "post": {
+              "timezone": "IST",
+              "start": 1793700000,
+              "end": 1793700000,
+              "gmtoffset": 19800
+            }
+          },
+          "dataGranularity": "1d",
+          "range": "1d",
+          "validRanges": [
+            "1d",
+            "5d",
+            "1mo",
+            "3mo",
+            "6mo",
+            "1y",
+            "2y",
+            "5y",
+            "10y",
+            "ytd",
+            "max"
+          ]
+        },
+        "timestamp": [
+          1793699979
+        ],
+        "indicators": {
+          "quote": [
+            {
+              "low": [
+                1133.5
+              ],
+              "open": [
+                1155.699951171875
+              ],
+              "volume": [
+                10494010
+              ],
+              "close": [
+                1148.0999755859375
+              ],
+              "high": [
+                1162.0
+              ]
+            }
+          ],
+          "adjclose": [
+            {
+              "adjclose": [
+                1148.0999755859375
+              ]
+            }
+          ]
+        }
+      }
+    ],
+    "error": null
+  }
+}

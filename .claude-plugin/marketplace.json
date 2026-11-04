@@ -9,7 +9,7 @@
   "plugins": [
     {
       "name": "day-trader-skill-nse",
-      "description": "Nine Claude skills for intraday trading on the NSE: a chart scanner, a news monitor (NSE announcements and board meetings), an entry timer, an exit planner, a time machine that replays 10,000 sessions, a risk manager, a budget manager (rupees, tick sizes, charges), an order executor for Zerodha or Angel One (paper by default, never without your yes) and price alerts.",
+      "description": "Ten Claude skills for intraday trading on the NSE: a chart scanner, a news monitor (NSE announcements and board meetings), an entry timer, an exit planner, a time machine that replays 10,000 sessions, a risk manager, a budget manager (rupees, tick sizes, charges), an order executor for Zerodha or Angel One (paper by default, never without your yes), price alerts and a paper-trading autopilot that runs the morning for you and stops at your yes.",
       "source": "./",
       "category": "productivity",
       "homepage": "https://github.com/Nandeep2750/day-trader-skill-nse"

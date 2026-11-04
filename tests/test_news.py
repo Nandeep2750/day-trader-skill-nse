@@ -287,6 +287,20 @@ class Check(unittest.TestCase):
         self.assertEqual(code, 2)
         self.assertIn("NSE only", err)
 
+    def test_every_fetch_failing_is_exit_2_not_nothing_new(self):
+        empty = os.path.join(self.tmp.name, "empty")
+        os.makedirs(empty)
+        args = ["--tickers", "INFY", "--hours", "24", "--dry-run", "--offline", empty, "--state", self.state,
+                "--now", NOW] + self.base[6:]
+        code, out, _ = run(args)
+        self.assertEqual(code, 2)
+        self.assertIn("note:", out)
+
+    def test_some_fetches_failing_is_still_1_or_0(self):
+        # ZZZZ has no Yahoo files offline, but the NSE feeds and the list load: not every source failed
+        code, _, _ = run(["--tickers", "ZZZZ", "--hours", "24", "--dry-run"] + self.base)
+        self.assertIn(code, (0, 1))
+
     def test_symbol_not_on_the_list(self):
         code, out, err = run(["--tickers", "ZZZZ", "--hours", "24", "--dry-run"] + self.base)
         self.assertIn("note: ZZZZ is not on NSE's equity list", out)

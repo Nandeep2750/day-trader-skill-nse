@@ -1,3 +1,4 @@
+import copy
 import datetime
 import io
 import json
@@ -651,6 +652,503 @@ class Money(unittest.TestCase):
         self.assertEqual(scan.inr(15.38), "₹15.38")
         self.assertEqual(scan.inr(-999.999), "-₹1,000.00")
         self.assertEqual(scan.group_in(500000), "5,00,000")
+
+
+# volatile: real Yahoo answers fetched Tue 2026-11-03 after the close: one 1-month daily spark
+# answer for 9 symbols (Yahoo dropped the made-up ZZZZQX) and 1-month daily v8 charts for 5 of them
+VOL = os.path.join(SDIR, "volatile-2026-11-03")
+VOL_NOW = "2026-11-03 18:00"
+
+
+def daily_series(rows, start=None):
+    """rows of (close, high, low[, volume]) -> a v8-like daily series, one NSE trading day each
+    (weekends and NSE holidays skipped), bar time 9:15 IST."""
+    d = start or D(2026, 10, 1)
+    t, c, h, lo, v = [], [], [], [], []
+    for r in rows:
+        while not scan.trading_day(d)[0]:
+            d += datetime.timedelta(days=1)
+        t.append(ts(d.isoformat() + " 09:15"))
+        c.append(r[0])
+        h.append(r[1])
+        lo.append(r[2])
+        v.append(r[3] if len(r) > 3 else 1000000)
+        d += datetime.timedelta(days=1)
+    return {"t": t, "c": c, "h": h, "l": lo, "o": None, "v": v,
+            "meta": {"regularMarketPrice": c[-1], "regularMarketVolume": v[-1]}}
+
+
+class Volatile(unittest.TestCase):
+    def setUp(self):
+        self.d = tempfile.mkdtemp()
+        self.wl = os.path.join(self.d, "trader", "watchlist.json")
+
+    def tearDown(self):
+        shutil.rmtree(self.d)
+
+    def test_offline_end_to_end_ranks_by_atr(self):
+        code, text, _ = run(["volatile", "--offline", VOL, "--now", VOL_NOW, "--out", self.wl])
+        self.assertEqual(code, 0)
+        self.assertIn("Volatility scan, Tue 2026-11-03 18:00 IST, daily bars through 2026-11-03 close (Yahoo).", text)
+        self.assertIn("Fetched 8 of 8 charts. 7 passed the floors (₹50+, ₹100 cr+ traded on the day).", text)
+        self.assertIn("Stage 2: the 7 biggest close-to-close movers sent for real highs and lows; 5 confirmed "
+                      "(2 had no usable daily chart), 0 under ₹150 cr average daily turnover dropped.", text)
+        self.assertIn("  CARTRADE      ₹2,498.40   7.76%    3.81%  +10.22%    10.81%      199 cr  check news", text)
+        self.assertIn("  RELIANCE      ₹1,307.90   2.86%    1.87%   +0.61%     1.98%    2,460 cr\n", text)
+        with open(self.wl, encoding="utf-8") as fh:
+            doc = json.load(fh)
+        self.assertEqual(doc["mode"], "volatile")
+        self.assertEqual(doc["as_of"], "2026-11-03 close")
+        self.assertEqual((doc["universe"], doc["scanned"], doc["failed"], doc["failed_stage2"]), (8, 7, 0, 2))
+        self.assertEqual([h["symbol"] for h in doc["hits"]], ["CARTRADE", "AEGISLOG", "WELCORP", "SWIGGY", "RELIANCE"])
+        h = doc["hits"][0]
+        self.assertEqual((h["price"], h["atr"], h["atr_pct"], h["avg_move_pct"], h["day_pct"], h["day_range_pct"]),
+                         (2498.4, 193.78, 7.76, 3.81, 10.22, 10.81))
+        self.assertEqual((h["day"], h["day_complete"], h["note"]), ("2026-11-03", True, "check news"))
+        self.assertEqual(doc["hits"][2]["note"], "")  # WELCORP moved +0.02 %
+        # the watchlist is readable by the other tools: a symbol per hit
+        self.assertEqual(scan.symbols_from_file(self.wl), ["CARTRADE", "AEGISLOG", "WELCORP", "SWIGGY", "RELIANCE"])
+
+    def test_thin_stock_is_filtered_by_todays_turnover(self):
+        code, text, _ = run(["volatile", "--offline", VOL, "--now", VOL_NOW, "--json", "--no-write",
+                             "--min-avg-turnover-cr", "0"])
+        doc = json.loads(text)
+        self.assertEqual(doc["counts"]["illiquid"], 1)  # 3PLAND: Rs 31, about Rs 0.02 cr traded
+        self.assertNotIn("3PLAND", [h["symbol"] for h in doc["hits"]])
+
+    def test_average_turnover_floor_and_nothing_found(self):
+        code, text, _ = run(["volatile", "--offline", VOL, "--now", VOL_NOW, "--json", "--no-write",
+                             "--min-avg-turnover-cr", "300"])
+        self.assertEqual(code, 0)
+        self.assertEqual([h["symbol"] for h in json.loads(text)["hits"]], ["WELCORP", "SWIGGY", "RELIANCE"])
+        code, text, _ = run(["volatile", "--offline", VOL, "--now", VOL_NOW, "--no-write",
+                             "--min-avg-turnover-cr", "99999"])
+        self.assertEqual(code, 1)
+        self.assertIn("No chart passed every floor.", text)
+
+    def test_top_keeps_the_most_volatile(self):
+        code, text, _ = run(["volatile", "--offline", VOL, "--now", VOL_NOW, "--top", "2", "--out", self.wl])
+        self.assertEqual(code, 0)
+        self.assertIn("  ... 3 more passed (--top N for more).", text)
+        with open(self.wl, encoding="utf-8") as fh:
+            doc = json.load(fh)
+        self.assertEqual([h["symbol"] for h in doc["hits"]], ["CARTRADE", "AEGISLOG"])
+
+    def test_max_confirm_reports_partial(self):
+        code, text, _ = run(["volatile", "--offline", VOL, "--now", VOL_NOW, "--no-write", "--max-confirm", "2"])
+        self.assertEqual(code, 0)
+        self.assertIn("(3 batches of 2)", text)  # it keeps going in batches, up to 3 x 2 charts
+        self.assertIn("PARTIAL: 1 more liquid charts were not checked (stage 2 stops at 15 found or 6 sent", text)
+
+    def test_a_symbol_yahoo_dropped_is_counted_as_failed(self):
+        code, text, _ = run(["volatile", "--offline", VOL, "--now", VOL_NOW, "--no-write",
+                             "--symbols", "CARTRADE,ZZZZQX,M&M"])
+        self.assertEqual(code, 0)
+        self.assertIn("Fetched 2 of 3 charts (1 failed or had no data).", text)
+        self.assertIn("(1 had no usable daily chart)", text)  # M&M: closes only, no v8 chart offline
+
+    def test_index_reads_the_nse_list(self):
+        code, text, _ = run(["volatile", "--offline", VOL, "--index", "nifty500", "--now", VOL_NOW, "--json",
+                             "--no-write"])
+        self.assertEqual(code, 0)
+        doc = json.loads(text)
+        self.assertEqual((doc["index"], doc["universe"]), ("nifty500", 7))
+        code, _, err = run(["volatile", "--offline", VOL, "--index", "nifty500", "--symbols", "RELIANCE",
+                            "--no-write"])
+        self.assertEqual(code, 1)
+        self.assertIn("--index replaces the symbol list", err)
+
+    def test_mid_session_leaves_the_live_bar_out_of_the_atr(self):
+        code, text, _ = run(["volatile", "--offline", VOL, "--now", "2026-11-03 11:00", "--json", "--no-write",
+                             "--min-turnover-cr", "0"])
+        doc = json.loads(text)
+        self.assertEqual(doc["as_of"], "2026-11-03 so far")
+        h = doc["hits"][0]
+        self.assertEqual((h["symbol"], h["day_complete"], h["atr_pct"]), ("CARTRADE", False, 8.07))
+        code, text, _ = run(["volatile", "--offline", VOL, "--now", "2026-11-03 11:00", "--no-write",
+                             "--min-turnover-cr", "0"])
+        self.assertIn("the latest session is still open: its move and range are so far", text)
+
+    def test_atr_is_the_simple_average_of_14_true_ranges(self):
+        rows = [(100.0, 102.0, 98.0)] * 15 + [(108.0, 110.0, 106.0)]  # a gap up: TR = 110 - 100 = 10
+        s = daily_series(rows)
+        now = scan.parse_now("2026-11-03 18:00")
+        a, why = scan.atr_stats(s, now)
+        self.assertIsNone(why)
+        self.assertAlmostEqual(a["atr"], (13 * 4 + 10) / 14.0)
+        self.assertAlmostEqual(a["atr_pct"], (13 * 4 + 10) / 14.0 / 108 * 100)
+        self.assertAlmostEqual(a["day_range_pct"], 4 / 108.0 * 100)
+        m, why = scan.move_stats(s, now)
+        self.assertAlmostEqual(m["day_pct"], 8.0)
+        self.assertAlmostEqual(m["avg_move_pct"], 8.0 / 14)
+
+    def test_none_bars_are_dropped_and_short_history_is_refused(self):
+        rows = [(100.0, 102.0, 98.0)] * 16
+        s = daily_series(rows)
+        s["c"][3] = None   # no close: gone everywhere
+        s["h"][5] = None   # no high: gone from the ATR only
+        now = scan.parse_now("2026-11-03 18:00")
+        done, live = scan.day_bars(s, now)
+        self.assertEqual((len(done), live), (15, None))
+        done, _ = scan.day_bars(s, now, ohlc=True)
+        self.assertEqual(len(done), 14)
+        a, why = scan.atr_stats(s, now)
+        self.assertIsNone(a)
+        self.assertIn("under 15 sessions", why)
+        short = daily_series([(100.0, 101.0, 99.0)] * 10)
+        self.assertEqual(scan.move_stats(short, now), (None, "short"))
+        hits, counts, _ = scan.scan_volatile({"X": short}, ["X"], now, 0, 0, 0, 0)
+        self.assertEqual((hits, counts["short"]), ([], 1))
+
+
+VOL5 = ["CARTRADE", "AEGISLOG", "WELCORP", "SWIGGY", "RELIANCE"]
+
+
+def vol_scan(data, now, **kw):
+    args = dict(min_price=50, min_turnover_cr=100, min_avg_turnover_cr=150, max_confirm=30, confirm=None, top=15)
+    args.update(kw)
+    return scan.scan_volatile(data, kw.pop("symbols", VOL5), scan.parse_now(now), args["min_price"],
+                              args["min_turnover_cr"], args["min_avg_turnover_cr"], args["max_confirm"],
+                              args["confirm"], args["top"])
+
+
+class VolatileEdges(unittest.TestCase):
+    """The adversarial review's cases, each on the real fixture data or a tiny synthetic series."""
+
+    def setUp(self):
+        self.data, _ = scan.load_offline_ohlc(VOL)
+        self.d = tempfile.mkdtemp()
+
+    def tearDown(self):
+        shutil.rmtree(self.d)
+
+    def fresh(self):
+        return copy.deepcopy(self.data)
+
+    def test_zero_means_all_for_max_confirm_and_top(self):
+        hits, counts, _ = vol_scan(self.data, VOL_NOW, max_confirm=0, top=0)
+        self.assertEqual((len(hits), counts["unconfirmed"]), (5, 0))
+        hits, counts, _ = vol_scan(self.data, VOL_NOW, max_confirm=2, top=1)
+        self.assertEqual((len(hits), counts["unconfirmed"], counts["ranked"]), (1, 3, 2))
+
+    def test_negative_counts_show_and_universe_with_index_are_refused(self):
+        for argv in (["--top", "-1"], ["--max-confirm", "-3"]):
+            with self.assertRaises(SystemExit):
+                with redirect_stderr(io.StringIO()):
+                    scan.main(["volatile", "--offline", VOL, "--no-write"] + argv)
+        code, _, err = run(["volatile", "--offline", VOL, "--no-write", "--show", "5"])
+        self.assertEqual(code, 1)
+        self.assertIn("use --top, not --show", err)
+        code, _, err = run(["volatile", "--offline", VOL, "--no-write", "--index", "nifty500", "--universe", "x.txt"])
+        self.assertEqual(code, 1)
+        self.assertIn("--index replaces the symbol list", err)
+
+    def test_mid_session_pro_rates_the_days_turnover_floor(self):
+        d = self.fresh()
+        for s in VOL5:  # at 10:15 only about a sixth of the day's volume has traded
+            d[s]["meta"]["regularMarketVolume"] = int(d[s]["meta"]["regularMarketVolume"] / 6)
+        hits, counts, _ = vol_scan(d, "2026-11-03 10:15")
+        self.assertAlmostEqual(counts["floor_fraction"], 60 / 375.0)  # 9:15 to 10:15 of a 375-minute session
+        self.assertEqual(counts["illiquid"], 0)
+        self.assertEqual(len(hits), 5)
+        hits, counts, _ = vol_scan(d, "2026-11-03 09:20")
+        self.assertEqual(counts["floor_fraction"], 0.1)  # never under a tenth of the floor
+        p = os.path.join(self.d, "v.json")
+        with open(p, "w") as fh:
+            json.dump({s: {"chart": {"result": [self.raw(s)]}} for s in VOL5}, fh)
+        code, text, _ = run(["volatile", "--offline", p, "--now", "2026-11-03 10:15", "--no-write"])
+        self.assertIn("pro-rated to 16% of the session", text)
+
+    def raw(self, sym):
+        with open(os.path.join(VOL, sym + ".json")) as fh:
+            return json.load(fh)["chart"]["result"][0]
+
+    def test_meta_price_is_the_live_price(self):
+        d = self.fresh()
+        d["SWIGGY"]["meta"]["regularMarketPrice"] = 180.0  # live price, not the last bar's close
+        hits, _, _ = vol_scan(d, "2026-11-03 11:00", min_turnover_cr=0)
+        h = [x for x in hits if x["symbol"] == "SWIGGY"][0]
+        self.assertEqual(h["price"], 180.0)
+        self.assertAlmostEqual(h["day_pct"], round((180.0 / 177.73 - 1) * 100, 2), places=2)
+
+    def test_a_big_down_move_gets_check_news(self):
+        rows = [(100.0, 102.0, 98.0)] * 15 + [(93.0, 99.0, 92.0, 30000000)]
+        s = daily_series(rows)
+        hits, _, _ = vol_scan({"X": s}, "2026-11-03 18:00", symbols=["X"], min_avg_turnover_cr=0, min_turnover_cr=0)
+        self.assertEqual((hits[0]["day_pct"], hits[0]["note"]), (-7.0, "check news"))
+
+    def test_a_sunday_bar_is_not_a_session(self):
+        d = self.fresh()
+        for s in VOL5:  # a Muhurat-style Sunday session, thin and tiny
+            x = d[s]
+            c0 = x["c"][-1]
+            x["t"].append(ts("2026-11-08 18:00"))
+            for k, v in (("c", c0 * 1.003), ("h", c0 * 1.006), ("l", c0 * 0.999), ("v", 1000)):
+                x[k].append(v)
+        hits, counts, _ = vol_scan(d, "2026-11-09 08:30")
+        self.assertEqual([h["day"] for h in hits], ["2026-11-03"] * 5)
+        self.assertEqual(hits[0]["symbol"], "CARTRADE")
+        done, live = scan.day_bars(d["CARTRADE"], scan.parse_now("2026-11-09 08:30"))
+        self.assertEqual(done[-1]["d"], D(2026, 11, 3))
+
+    def test_a_stale_symbol_is_dropped(self):
+        d = self.fresh()
+        for k in ("t", "c", "h", "l", "v"):
+            d["AEGISLOG"][k] = d["AEGISLOG"][k][:-5]
+        hits, counts, _ = vol_scan(d, VOL_NOW)
+        self.assertEqual(counts["stale"], 1)
+        self.assertNotIn("AEGISLOG", [h["symbol"] for h in hits])
+
+    def test_zero_or_negative_prices_are_treated_as_missing(self):
+        d = self.fresh()
+        d["SWIGGY"]["c"][10] = 0.0
+        d["WELCORP"]["l"][12] = -1.0
+        hits, counts, _ = vol_scan(d, VOL_NOW)  # no ZeroDivisionError
+        self.assertIn("SWIGGY", [h["symbol"] for h in hits])
+        done, _ = scan.day_bars(d["WELCORP"], scan.parse_now(VOL_NOW), ohlc=True)
+        self.assertEqual(len(done), 20)  # that bar is gone from the ATR, not the whole stock
+
+    def test_missing_volume_is_left_out_of_the_turnover_average(self):
+        rows = [(100.0, 102.0, 98.0, 2000000)] * 16
+        s = daily_series(rows)
+        for i in range(2, 8):
+            s["v"][i] = None
+        a, why = scan.atr_stats(s, scan.parse_now("2026-11-03 18:00"))
+        self.assertEqual((a["turnover_sessions"], a["avg_turnover_cr"]), (10, 20.0))  # not diluted toward 0
+        s["v"][8] = None
+        a, why = scan.atr_stats(s, scan.parse_now("2026-11-03 18:00"))
+        self.assertEqual((a, why), (None, "under 10 sessions with a volume"))
+
+    def test_an_unadjusted_split_is_left_out(self):
+        rows = [(1000.0, 1010.0, 990.0)] * 10 + [(500.0, 505.0, 495.0)] * 6  # a 1:1 bonus, not a crash
+        s = daily_series(rows)
+        hits, counts, _ = vol_scan({"X": s}, "2026-11-03 18:00", symbols=["X"], min_turnover_cr=0,
+                                   min_avg_turnover_cr=0)
+        self.assertEqual((hits, counts["jump"], counts["jumps"]), ([], 1, ["X"]))
+        p = os.path.join(self.d, "X.json")
+        with open(p, "w") as fh:
+            json.dump({"chart": {"result": [{"meta": {"symbol": "X.NS", "regularMarketPrice": 500.0,
+                                                      "regularMarketVolume": 10 ** 7},
+                                             "timestamp": s["t"], "indicators": {"quote": [
+                                                 {"close": s["c"], "high": s["h"], "low": s["l"],
+                                                  "volume": s["v"]}]}}]}}, fh)
+        code, text, _ = run(["volatile", "--offline", self.d, "--now", "2026-11-03 18:00", "--no-write"])
+        self.assertIn("Left out, a price step that matches a split or bonus ratio: X. Check corporate action "
+                      "(split/bonus?).", text)
+
+    def test_a_real_crash_day_is_not_a_split(self):
+        # CARTRADE 2026-10-28: close -12.6 %, true range 21.7 % of the previous close: a real move
+        hits, counts, _ = vol_scan(self.data, VOL_NOW)
+        self.assertEqual((counts["jump"], hits[0]["symbol"]), (0, "CARTRADE"))
+
+    def test_no_range_when_the_chart_lacks_the_latest_day(self):
+        d = self.fresh()
+        d["CARTRADE"]["h"][-1] = None  # the live v8 bar has no high yet
+        hits, _, _ = vol_scan(d, "2026-11-03 11:00", min_turnover_cr=0)
+        h = [x for x in hits if x["symbol"] == "CARTRADE"][0]
+        self.assertIsNone(h["day_range_pct"])
+        p = os.path.join(self.d, "b.json")
+        raw = self.raw("CARTRADE")
+        raw["indicators"]["quote"][0]["high"][-1] = None
+        with open(p, "w") as fh:
+            json.dump({"CARTRADE": {"chart": {"result": [raw]}}}, fh)
+        code, text, _ = run(["volatile", "--offline", p, "--now", "2026-11-03 11:00", "--no-write",
+                             "--min-turnover-cr", "0"])
+        self.assertIn("        -", text)
+        self.assertIn("no range for 2026-11-03", text)
+
+    def test_short_turnover_window_is_reported(self):
+        rows = [(100.0, 102.0, 98.0, 30000000)] * 16  # 16 sessions: 15 completed in the turnover window
+        s = daily_series(rows)
+        a, _ = scan.atr_stats(s, scan.parse_now("2026-11-03 18:00"))
+        self.assertEqual(a["turnover_sessions"], 16)
+        p = os.path.join(self.d, "S.json")
+        with open(p, "w") as fh:
+            json.dump({"chart": {"result": [{"meta": {"symbol": "S.NS", "regularMarketPrice": 100.0,
+                                                      "regularMarketVolume": 30000000},
+                                             "timestamp": s["t"], "indicators": {"quote": [
+                                                 {"close": s["c"], "high": s["h"], "low": s["l"],
+                                                  "volume": s["v"]}]}}]}}, fh)
+        code, text, _ = run(["volatile", "--offline", self.d, "--now", "2026-11-03 18:00", "--no-write"])
+        self.assertIn("turnover over 16 sessions", text)
+
+    def test_a_single_file_bundle_keeps_the_v8_chart(self):
+        p = os.path.join(self.d, "bundle.json")
+        with open(p, "w") as fh:
+            json.dump({"CARTRADE": {"chart": {"result": [self.raw("CARTRADE")]}},
+                       "spark": json.load(open(os.path.join(VOL, "spark-1mo-1d.json")))}, fh)
+        code, text, _ = run(["volatile", "--offline", p, "--symbols", "CARTRADE", "--now", VOL_NOW,
+                             "--no-write", "--json"])
+        doc = json.loads(text)
+        self.assertEqual(([h["symbol"] for h in doc["hits"]], doc["failed_stage2"]), (["CARTRADE"], 0))
+
+    def test_index_with_an_offline_file_never_touches_the_network(self):
+        calls = []
+        old = scan.http_get
+        scan.http_get = lambda url, timeout=20: calls.append(url) or ""
+        try:
+            code, text, _ = run(["volatile", "--offline", os.path.join(VOL, "spark-1mo-1d.json"), "--index",
+                                 "nifty500", "--now", VOL_NOW, "--no-write", "--json"])
+            self.assertEqual((calls, json.loads(text)["universe"]), ([], 7))  # the CSV next to the file
+            lone = os.path.join(self.d, "spark.json")
+            shutil.copy(os.path.join(VOL, "spark-1mo-1d.json"), lone)
+            code, _, err = run(["volatile", "--offline", lone, "--index", "nifty500", "--no-write"])
+            self.assertEqual((code, calls), (1, []))
+            self.assertIn("--index needs an offline folder", err)
+        finally:
+            scan.http_get = old
+
+    def test_nothing_fetched_keeps_the_old_watchlist(self):
+        wl = os.path.join(self.d, "watchlist.json")
+        with open(wl, "w") as fh:
+            fh.write('{"mode": "daily", "hits": [{"symbol": "KEEP"}]}')
+        for mode in ("volatile", "daily"):
+            code, text, _ = run([mode, "--offline", VOL, "--symbols", "ZZZZQX", "--now", VOL_NOW, "--out", wl])
+            self.assertEqual(code, 1)
+            self.assertIn("Nothing was fetched, so %s was left as it was." % wl, text)
+            self.assertEqual(scan.symbols_from_file(wl), ["KEEP"])
+
+
+def junk(base, k):
+    """A thin, wild small cap made from a real chart: 4 % swings, 1,000 shares a day."""
+    s = copy.deepcopy(base)
+    s["c"] = [200 * (1.04 if i % 2 else 0.96) for i in range(len(s["c"]))]
+    s["h"] = [c * 1.01 for c in s["c"]]
+    s["l"] = [c * 0.99 for c in s["c"]]
+    s["v"] = [1000] * len(s["v"])
+    s["meta"] = dict(s["meta"], regularMarketVolume=1000)
+    return s
+
+
+class VolatileRound2(unittest.TestCase):
+    def setUp(self):
+        self.data, _ = scan.load_offline_ohlc(VOL)
+
+    def test_thin_movers_do_not_eat_the_stage_2_slots_mid_session(self):
+        d = copy.deepcopy(self.data)
+        syms = list(VOL5)
+        for k in range(30):
+            d["JUNK%d" % k] = junk(self.data["SWIGGY"], k)
+            syms.append("JUNK%d" % k)
+        hits, counts, _ = vol_scan(d, "2026-11-03 14:00", symbols=syms)
+        self.assertEqual(sorted(h["symbol"] for h in hits), sorted(VOL5))
+        self.assertEqual(counts["illiquid"], 30)  # the pro-rated floor (76 % at 14:00) still bites
+
+    def test_stage_2_keeps_confirming_in_batches_until_top_is_found(self):
+        d = copy.deepcopy(self.data)
+        syms = list(VOL5)
+        for k in range(4):  # liquid by today's meta, thin by the 20-session average: stage 2 drops them
+            j = junk(self.data["SWIGGY"], k)
+            j["meta"]["regularMarketVolume"] = 10 ** 8
+            j["c"] = [c * 3 for c in j["c"]]  # wilder than the real five, so they go first
+            d["JUNK%d" % k] = j
+            syms.append("JUNK%d" % k)
+        hits, counts, _ = vol_scan(d, VOL_NOW, symbols=syms, max_confirm=2, top=2)
+        self.assertEqual(len(hits), 2)
+        self.assertEqual(counts["thin"], 4)
+        self.assertEqual((counts["sent"], counts["batches"]), (6, 3))  # 2 + 2 junk, then 2 real ones
+        hits, counts, _ = vol_scan(d, VOL_NOW, symbols=syms, max_confirm=1, top=5)
+        self.assertEqual((counts["sent"], counts["batches"], len(hits)), (3, 3, 0))  # capped at 3 x 1
+
+    def test_a_replay_never_uses_a_later_days_meta(self):
+        hits, counts, _ = vol_scan(self.data, "2026-10-30 18:00", min_turnover_cr=100)
+        self.assertEqual(counts["turnover_unknown"], 5)
+        now = scan.parse_now("2026-10-30 18:00")
+        for h in hits:
+            done, _ = scan.day_bars(self.data[h["symbol"]], now)
+            self.assertEqual(h["price"], round(done[-1]["c"], 2))  # that day's close, not today's meta
+            self.assertIsNone(h["turnover_cr"])
+            self.assertEqual(h["day"], "2026-10-30")
+
+    def test_a_25_percent_genuine_move_is_not_a_split(self):
+        for factor in (0.75, 0.73, 1.25):  # a 25 % crash, a 27 % crash, a 25 % jump: ratios 1.33, 1.37, 0.8
+            rows = [(1000.0, 1010.0, 990.0)] * 10 + [(1000.0 * factor, 1010.0 * factor, 990.0 * factor)] * 6
+            s = daily_series(rows)
+            st, _ = scan.move_stats(s, scan.parse_now("2026-11-03 18:00"))
+            a, _ = scan.atr_stats(s, scan.parse_now("2026-11-03 18:00"))
+            self.assertEqual((st["jump"], a["jump"]), (False, False), factor)
+        for ratio in (2, 1.5, 5, 10):  # 1:1 bonus, 1:2 bonus, 5-for-1 and 10-for-1 splits
+            rows = [(1000.0, 1010.0, 990.0)] * 10 + [(1000.0 / ratio, 1010.0 / ratio, 990.0 / ratio)] * 6
+            st, _ = scan.move_stats(daily_series(rows), scan.parse_now("2026-11-03 18:00"))
+            self.assertTrue(st["jump"], ratio)
+        # RELIANCE halved 6 sessions ago (an unadjusted 1:1 bonus) on a quiet day (-0.5 %). A split on a
+        # day that also really moved more than about 3 % slips past the ratio test: SPLIT_TOL is the trade-off.
+        d = copy.deepcopy(self.data)
+        s = d["RELIANCE"]
+        for j in range(len(s["c"]) - 6, len(s["c"])):
+            for k in ("c", "h", "l"):
+                s[k][j] = s[k][j] / 2
+        s["meta"]["regularMarketPrice"] /= 2
+        hits, counts, _ = vol_scan(d, VOL_NOW)
+        self.assertEqual(counts["jumps"], ["RELIANCE"])
+
+    def test_non_finite_prices_and_volumes_are_missing(self):
+        rows = [(100.0, 102.0, 98.0, 2000000)] * 16
+        s = daily_series(rows)
+        s["c"][3] = float("nan")
+        s["v"][4] = float("nan")
+        s["h"][5] = float("inf")
+        now = scan.parse_now("2026-11-03 18:00")
+        done, _ = scan.day_bars(s, now)
+        self.assertEqual(len(done), 15)
+        self.assertIsNone(done[3]["v"])  # the NaN-volume bar keeps its close, loses its volume
+        done, _ = scan.day_bars(s, now, ohlc=True)
+        self.assertEqual(len(done), 14)
+        s["meta"]["regularMarketVolume"] = float("nan")
+        s["meta"]["regularMarketTime"] = s["t"][-1]
+        st, _ = scan.move_stats(s, now)
+        self.assertIsNone(st["turnover_cr"])
+
+    def test_a_zero_close_never_becomes_a_bar(self):
+        d = copy.deepcopy(self.data)
+        d["SWIGGY"]["c"][10] = 0.0
+        done, _ = scan.day_bars(d["SWIGGY"], scan.parse_now(VOL_NOW))
+        self.assertEqual(len(done), 20)
+        self.assertTrue(all(b["c"] > 0 for b in done))
+        st, why = scan.move_stats(d["SWIGGY"], scan.parse_now(VOL_NOW))
+        self.assertIsNone(why)
+
+    def test_negative_counts_are_refused_by_the_function_too(self):
+        for kw in ({"top": -1}, {"max_confirm": -1}):
+            with self.assertRaises(scan.ScanError):
+                vol_scan(self.data, VOL_NOW, **kw)
+
+
+class VolatileNetwork(unittest.TestCase):
+    """The volatile scan's requests, without the network."""
+
+    def setUp(self):
+        self.urls, self.sleeps = [], []
+        self._get, self._sleep = scan.http_get, scan.SLEEP
+        scan.SLEEP = self.sleeps.append
+
+        def fake(url, timeout=20):
+            self.urls.append(url)
+            if "/v7/finance/spark" in url:
+                return read_text(os.path.join(VOL, "spark-1mo-1d.json"))
+            sym = url.split("/v8/finance/chart/")[1].split(".NS")[0]
+            p = os.path.join(VOL, sym + ".json")
+            if not os.path.exists(p):
+                raise urllib.error.HTTPError(url, 404, "x", {}, io.BytesIO(b""))
+            return read_text(p)
+        scan.http_get = fake
+
+    def tearDown(self):
+        scan.http_get, scan.SLEEP = self._get, self._sleep
+
+    def test_spark_then_daily_v8_charts(self):
+        code, text, _ = run(["volatile", "--symbols", "CARTRADE,AEGISLOG,M&M,3PLAND", "--now", VOL_NOW,
+                             "--no-write", "--json"])
+        self.assertEqual(code, 0)
+        self.assertIn("/v7/finance/spark?symbols=CARTRADE.NS,AEGISLOG.NS,M%26M.NS,3PLAND.NS&range=1mo&interval=1d",
+                      self.urls[0])
+        charts = [u.split("/v8/finance/chart/")[1] for u in self.urls[1:]]
+        self.assertEqual(sorted(charts), ["AEGISLOG.NS?range=2mo&interval=1d", "CARTRADE.NS?range=2mo&interval=1d",
+                                          "M%26M.NS?range=2mo&interval=1d"])  # 3PLAND never gets past stage 1
+        doc = json.loads(text)
+        self.assertEqual([h["symbol"] for h in doc["hits"]], ["CARTRADE", "AEGISLOG"])
+        self.assertEqual(doc["failed_stage2"], 1)  # M&M: no chart in this fake
+        self.assertEqual(self.sleeps, [scan.PAUSE] * 3)  # a polite pause before each v8 chart
 
 
 if __name__ == "__main__":

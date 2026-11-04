@@ -1,10 +1,45 @@
 {
   "rules": [
-    {"id": "opening-bell", "type": "opening_bell"},
-    {"id": "reliance-plan-stop", "symbol": "RELIANCE", "type": "stop", "price": 1295.5, "note": "plan stop: opening-range midpoint", "date": "2026-11-03"},
-    {"id": "reliance-plan-target", "symbol": "RELIANCE", "type": "target", "price": 1304.5, "note": "plan target: 1R (one times the risk)", "date": "2026-11-03"},
-    {"id": "reliance-flat-by", "symbol": "RELIANCE", "type": "time", "at": "15:10", "label": "flat by close", "date": "2026-11-03"},
-    {"id": "reliance-square-off", "symbol": "RELIANCE", "type": "square_off", "broker": "zerodha", "date": "2026-11-03"},
-    {"id": "infy-move-3", "symbol": "INFY", "type": "pct_move", "pct": 3}
+    {
+      "id": "opening-bell",
+      "type": "opening_bell"
+    },
+    {
+      "id": "reliance-plan-stop",
+      "symbol": "RELIANCE",
+      "type": "stop",
+      "price": 1295.5,
+      "note": "plan stop: opening-range midpoint",
+      "date": "2026-11-03"
+    },
+    {
+      "id": "reliance-plan-target",
+      "symbol": "RELIANCE",
+      "type": "target",
+      "price": 1304.5,
+      "note": "plan target: 1R (one times the risk)",
+      "date": "2026-11-03"
+    },
+    {
+      "id": "reliance-flat-by",
+      "symbol": "RELIANCE",
+      "type": "time",
+      "at": "15:10",
+      "label": "flat by close",
+      "date": "2026-11-03"
+    },
+    {
+      "id": "reliance-square-off",
+      "symbol": "RELIANCE",
+      "type": "square_off",
+      "broker": "zerodha",
+      "date": "2026-11-03"
+    },
+    {
+      "id": "infy-move-3",
+      "symbol": "INFY",
+      "type": "pct_move",
+      "pct": 3
+    }
   ]
 }

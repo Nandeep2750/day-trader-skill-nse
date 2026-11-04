@@ -26,7 +26,9 @@ The Order Executor is the only skill in this pack that can lead to a real
 order, so it is the strictest. An order reaches NSE only after three
 separate gates, every time, for every order:
 
-1. **trader-risk passed this exact order today** (matched by fingerprint).
+1. **trader-risk passed this exact order, under this exact config, in the last 5 minutes**
+   (matched by fingerprint; an entry also needs the market open and the time before
+   `no_entries_after`). An older PASS is stale: re-run `/trader-risk`.
 2. **The user typed an explicit yes for this one order** in the chat.
 3. **The user clicked Allow once** on Claude's own permission card, which
    appears because the broker's order tools are set to "Needs approval".
@@ -37,7 +39,7 @@ Two yeses from the user, one PASS from the rules. No yes, no order.
 
 ```bash
 python3 "${CLAUDE_SKILL_DIR}/ticket.py" show                     # every ticket, READY or not
-python3 "${CLAUDE_SKILL_DIR}/ticket.py" approve --index 1 --reply "yes"
+python3 "${CLAUDE_SKILL_DIR}/ticket.py" approve --index 1 --fingerprint 1a2b3c4d --reply "yes"
 python3 "${CLAUDE_SKILL_DIR}/ticket.py" result --index 1 --status placed --broker-id ID --filled-qty 20 --filled-price 1228.10
 python3 "${CLAUDE_SKILL_DIR}/ticket.py" result --index 1 --status paper          # paper mode
 python3 "${CLAUDE_SKILL_DIR}/ticket.py" stop --index 1                           # step 2: the stop call
@@ -73,7 +75,8 @@ more, so the pack builds its own, in two steps:
 2. **The protective stop, right after the entry fills**: an SL-M SELL for
    the filled quantity at the plan's stop (Kite `order_type` "SL-M" with
    `trigger_price`; Angel One `variety` "STOPLOSS", `ordertype`
-   "STOPLOSS_MARKET" with `triggerprice`). The user's yes for the bracket
+   "STOPLOSS_MARKET" with `triggerprice` and `price` "0", the SmartAPI
+   convention for market types). The user's yes for the bracket
    ticket covers this stop; Claude's Allow once card still asks for it.
 
 **The target is never a resting order.** A resting target sell next to a
@@ -85,6 +88,16 @@ at once. If the stop call fails, say so loudly and offer to retry or flatten.
 
 ## Paper mode (the default)
 
+A paper fill is simulated at `--filled-price`, else the limit price or the
+plan's entry, else a price in `trader/prices.json` under 15 minutes old. A
+market flatten has no price of its own, so pass `--filled-price` (the live
+price from trader-alerts) or keep prices.json fresh.
+
+Live trading needs `"paper": false`, literally. A missing, empty or null
+`paper` means paper. A live entry also needs an exchange stop on the order
+(a bracket): an order with only a plan stop is refused ("no exchange stop:
+use a bracket order").
+
 Neither Zerodha nor Angel One has a paper account. With `"paper": true`
 Claude calls **no broker tool at all**. The ticket header says
 `PAPER (SIMULATED: no order goes to Zerodha)`. After the user's yes:
@@ -93,6 +106,32 @@ limit price or the plan's entry (or `--filled-price P`, for example the live
 price from trader-alerts) and a simulated stop. It is logged with
 `"paper": true`, and trader-risk counts it like a real trade, so the daily
 limits are practised too.
+
+## Auto-paper (delegated paper approvals, for the autopilot)
+
+When the user will be away and wants the pack to trade **paper only** on its
+own, they can delegate the yes for paper orders in `trader/config.json`:
+
+```json
+{"paper": true, "autopilot": {"auto_paper": true}}
+```
+
+Then `ticket.py approve --index N --fingerprint <first 8 hex of show --json's
+"fingerprint"> --auto-paper` records the approval without a human reply
+(reply "auto-paper (delegated by the user in config; no human yes)",
+`"auto": true`), and `ticket.py result --index N --status paper
+--filled-price P` records the simulated fill as usual. `log` marks these
+rows AUTO-PAPER. Every guard is separate and literal:
+
+- `"paper"` must not be false. **A live config makes --auto-paper impossible**,
+  even with `auto_paper` true. Live orders always need the user's own yes.
+- `autopilot.auto_paper` must be the JSON value `true` (not "true", not 1).
+- Every other approve gate still holds: a PASS no more than 5 minutes old,
+  the fingerprint of the ticket, the clock for entries, a canonical order.
+- Flatten tickets (exits) can be auto-approved the same way; exits have no
+  time-of-day gate.
+
+Never set `auto_paper` for the user: only they turn it on, in their own config.
 
 ## Setup A: Zerodha (official kite-mcp-server, self-hosted)
 
@@ -178,13 +217,26 @@ put an order tool in `allow`.
 ## Steps: the entry
 
 1. `ticket.py show`. Only READY tickets go to the user. A ticket that is NOT
-   READY or BLOCKED goes back to `/trader-risk`.
+   READY, BLOCKED or stale ("PASS is stale") goes back to `/trader-risk`. Tickets
+   that are not READY print no broker calls at all.
 2. Show ONE ticket and ask: "Place this order? Reply yes or no." One order
    per question. Never offer "yes to all".
-3. Run `ticket.py approve --index N --reply "<the user's reply, word for word>"`.
+3. Run `ticket.py approve --index N --fingerprint <the 8 hex on the ticket you showed>
+   --reply "<the user's reply, word for word>"`. The fingerprint proves the order did
+   not change between the ticket and the yes; a mismatch means show it again.
    If it prints "Not recorded", the reply was not an explicit yes for this
-   order (for example "sure", "haan", "yes to all", or a yes that names a
-   different stock or amount). Ask again. Never turn a reply into a yes yourself.
+   order. A yes counts only as "yes" or "y", optionally followed by nothing but
+   this order's symbol, its side, words like place, it, order, please, go,
+   ahead, confirm, do, now, shares (and the marks , . ! ; @ -), and numbers: a
+   bare number must be the qty or the limit price; a loss figure counts only as
+   "max loss N" or "₹N". "Sure", "haan", "yes to all", "yes, abort", "yes after
+   lunch", "yes sell it" on a buy, the stop or target as a bare number, or any
+   other stock or number is not a yes. Ask again. Never turn a reply into a yes
+   yourself. approve re-checks the 5-minute PASS and the clock.
+   **A PASS and a yes each count for 5 minutes.** After that, re-run
+   `/trader-risk`, show the ticket again if the max loss changed, and ask
+   again. A yes older than the PASS it relies on does not count. A declined,
+   denied or failed order re-opens only with a new PASS and a new yes.
 4. Paper: call no broker tool; `ticket.py result --index N --status paper`. Done.
 5. Live: only after "Recorded your yes", make exactly the calls the ticket
    printed (Angel One: `search_scrip` first, then `place_order` with the
@@ -192,10 +244,21 @@ put an order tool in `allow`.
 6. Record it: `ticket.py result --index N --status placed --broker-id <order id>
    --filled-qty Q --filled-price P` (from `get_orders` / `get_order_book`), or
    `--status denied`, or `--status failed --note "..."`. A failed order is not
-   retried without a new check and a new yes.
+   retried without a new check and a new yes. The 5-minute limit gates MAKING
+   the call, never RECORDING what happened: a late `result` is always accepted
+   for today's yes. A yes with no result that is too old to act on shows
+   "UNRESOLVED": no calls, never READY again, until you check `get_orders`
+   (Kite tag `dts<fingerprint>`, or the Angel One order book) and record
+   `result --status placed ...`, or `--status denied` if it was never sent.
 7. At once: `ticket.py stop --index N` prints the SL-M stop call for the
    filled quantity. Make it, then `ticket.py stop --index N --status placed
    --broker-id <id>` (or `--status failed`, which prints a warning: retry or flatten).
+   Only one stop per position: if one is already open, `stop` refuses and prints
+   the `modify_order` call to change its quantity instead (Kite: variety,
+   order_id, order_type SL-M, quantity, trigger_price; Angel One: all its
+   modify_order fields with price "0").
+8. If the config changes after a yes (paper, broker), `result` and `stop` refuse:
+   "config changed since your yes: re-check and re-approve".
 
 ## Steps: while it is open, and out by flat_by
 
@@ -207,9 +270,21 @@ put an order tool in `allow`.
   1. Ask the broker what is held: `get_positions` (read only). If the stop
      already filled, there is nothing to sell.
   2. `ticket.py flatten --symbol RELIANCE --qty 20` writes the flatten
-     ticket: cancel the recorded open stop (Kite `cancel_order` {variety
-     "regular", order_id}; Angel One `cancel_order` {variety "STOPLOSS",
-     orderid}), then a MARKET SELL MIS for those shares.
+     ticket: cancel EVERY recorded open stop for the symbol, one call each
+     (Kite `cancel_order` {variety "regular", order_id}; Angel One
+     `cancel_order` {variety "STOPLOSS", orderid}), then a MARKET SELL in the
+     position's own product (MIS unless the fill recorded otherwise).
+     **If any cancel fails because the stop already executed, do NOT send the
+     sell; check get_positions.** If a cancel fails because the stop was already
+     cancelled, it is gone: the sell can go.
+     Record each cancel as it happens: `ticket.py result --index N --cancelled ID`,
+     or `--cancel-failed ID --reason executed|already-cancelled`. A flatten built
+     after a partial cancel only cancels the stops still open.
+     If the cancels went through but the sell is then denied or failed, the
+     ticket prints **NO STOP AT THE EXCHANGE** with the SL-M call to put the
+     stop back (the held qty, the cancelled stop's trigger). Re-flatten at once,
+     or place that stop and record it: `ticket.py result --index N --restop-id ID`.
+     In paper mode the stop is put back as a simulated one.
   3. `/trader-risk`. A sell that only closes what the user holds is never
      blocked by the daily limits or the entry window.
   4. `ticket.py show`, then the user's yes for that one ticket, the calls in
@@ -223,6 +298,7 @@ ORDER 1 of 1, LIVE ACCOUNT, REAL MONEY, Zerodha (Kite MCP)
   stop-loss 1215.60 (SL-M, placed after the entry fills)
   target 1240.40 (watched by trader-alerts, not a resting order)
   max loss about ₹248 if the stop fills at 1215.60 (it can fill worse in a fast market)
+  fingerprint: 1a2b3c4d
   READY: trader-risk PASS, waiting for your yes
   Step 1, after your yes, Claude calls the Zerodha (Kite MCP) tools:
     1. place_order with exactly:
@@ -252,7 +328,7 @@ The `why` and the plan stay in the file; they are never sent.
 - Education and tooling, not financial advice. A PASS is a rules check, not a recommendation.
 - Paper trading by default (`"paper": true`). Going live is the user's own decision, in their own config.
 - Nothing in this pack places an order except trader-broker, and only when all three hold: trader-risk
-  passed that exact order today, the user typed an explicit yes for that one order in the chat, and the
+  passed that exact order in the last 5 minutes, the user typed an explicit yes for that one order in the chat, and the
   user clicked Allow once on Claude's own card because the order tool is set to "Needs approval".
   Never set an order tool to "Always allow".
 - No F&O, margin beyond the config, short selling or delivery (CNC) unless the config allows it and the

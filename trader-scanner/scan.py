@@ -8,6 +8,7 @@
     python3 scan.py orb                               # after 9:35 AM IST: opening-range breakouts so far
     python3 scan.py orb --at 09:45 --or-minutes 15    # cut the clock at 9:45 AM IST
     python3 scan.py orb --offline wall5m.json.gz --now "2026-10-29 09:45" --min-price 0
+    python3 scan.py volatile --index nifty500 --top 12 # after the close: the most volatile liquid stocks
 
 universe  Downloads NSE's list of listed equities (EQUITY_L.csv from
           nsearchives.nseindia.com) and keeps the EQ series only: BE and BZ
@@ -48,6 +49,23 @@ orb       Opening-range breakouts, 5-minute bars. The range is the first
           9:15 bar; a gap there is the last close carried forward.
           Floors: --min-price 50 (last close, rupees), --min-volume 0.
 
+volatile  The most volatile stocks that are liquid enough to day trade, for
+          tomorrow's watchlist. Stage 1: Yahoo spark, 1 month of daily closes,
+          20 symbols a request: the average absolute close-to-close move over
+          the last 14 completed sessions, the latest session's move, and its
+          turnover (price x volume from the spark meta, in crore). Floors:
+          --min-price 50 and --min-turnover-cr 100. Stage 2: the --max-confirm
+          (30) biggest average movers get a 1-month daily v8 chart (real highs
+          and lows): ATR = the SIMPLE average of the last 14 true ranges (not
+          Wilder's smoothing), shown as a % of the last completed close; the
+          latest session's high-to-low range %; average turnover over the last
+          20 completed sessions, floor --min-avg-turnover-cr 150. Ranked by
+          ATR %, --top 15 kept and written. A session move of 5 % or more gets
+          "check news". --index all|nifty500 scans NSE's list instead of the
+          universe file. While the session is open, today's bar is left out of
+          the ATR and the averages, and its move and range are labelled "so
+          far"; after the 3:30 PM close it counts as a completed session.
+
 Bars: null closes are dropped, a bar off the 5-minute grid (the live tick,
 like 10:49:45) is dropped, and a bar counts only once it is complete
 (start + 5 minutes <= the clock). Times are India Standard Time (IST, UTC+5:30,
@@ -74,6 +92,7 @@ import csv
 import datetime
 import gzip
 import json
+import math
 import os
 import re
 import sys
@@ -96,6 +115,15 @@ SLEEP = time.sleep  # tests swap this out
 BAR_MIN = 5
 MAX_CONFIRM = 200   # stage-2 v8 charts per orb scan, most traded first
 MIN_DAILY_BARS = 30
+VOL_SESSIONS = 14       # volatile: average move and ATR over the last 14 completed sessions
+TURNOVER_SESSIONS = 20  # volatile: average daily turnover over the last 20 completed sessions
+VOL_CONFIRM = 30        # volatile: stage-2 v8 charts, the biggest average movers first
+BIG_MOVE = 5.0          # volatile: a session move this size (%) gets a "check news" note
+SPLIT_RATIOS = (1.5, 2, 2.5, 3, 4, 5, 10)  # volatile: previous close / close of a split or bonus
+SPLIT_TOL = 0.03        # volatile: within 3 % of one of those ratios is an unadjusted split / bonus
+SESSION_MIN = 375       # NSE regular session, 9:15 to 15:30, in minutes
+MIN_TURNOVER_SESSIONS = 10  # volatile: sessions with a volume needed for the average turnover
+VOL_CHART_RANGE = "2mo"     # volatile stage 2: enough daily bars for 20 sessions of turnover
 DEFAULT_UNIVERSE = "trader/universe.txt"
 NOTE = "A scan is a list of charts that match a rule, not a list of stocks to buy."
 
@@ -546,6 +574,233 @@ def scan_daily(data, symbols, now_utc, min_price, min_volume):
     return hits, counts, last_date
 
 
+# ---------------------------------------------------------------- volatility
+
+def _pos(x):
+    """A price that can be used: a finite positive number, else None (Yahoo sends 0, NaN or junk at times)."""
+    try:
+        x = float(x)
+    except (TypeError, ValueError):
+        return None
+    return x if math.isfinite(x) and x > 0 else None
+
+
+def _vol(x):
+    """A volume that can be used: a finite number >= 0, else None."""
+    try:
+        x = float(x)
+    except (TypeError, ValueError):
+        return None
+    return x if math.isfinite(x) and x >= 0 else None
+
+
+def split_like(prev, close):
+    """Does prev -> close look like an unadjusted split or bonus? True when prev / close
+    is within SPLIT_TOL of a SPLIT_RATIOS ratio (2 = 1:1 bonus or 2-for-1 split, 1.5 =
+    1:2 bonus, 10 = 10-for-1 split ...). A genuine 25 % move (1.33) is not."""
+    r = prev / close
+    return any(abs(r / k - 1) <= SPLIT_TOL for k in SPLIT_RATIOS)
+
+
+def day_bars(series, now_utc, ohlc=False):
+    """Daily bars through the clock, one per NSE trading day (a late duplicate wins),
+    as dicts d/h/l/c/v. Dropped: a bar whose close is missing or not positive, a bar
+    dated on a weekend or NSE holiday (a Muhurat or other special session is not a
+    regular session), and with ohlc a bar whose high or low is missing or not
+    positive. A missing volume stays None. Returns (completed, live): live is today's
+    bar while the session is still open (its numbers are so far), else None."""
+    now = to_ist(now_utc)
+    today = now.date()
+    by_day = {}
+    hs, ls, vs = series.get("h"), series.get("l"), series.get("v")
+    for i, (ts, c) in enumerate(zip(series["t"], series["c"])):
+        c = _pos(c)
+        if c is None:
+            continue
+        d = ts_to_ist(ts).date()
+        if d > today or not trading_day(d)[0]:
+            continue
+        h = _pos(hs[i]) if hs else None
+        lo = _pos(ls[i]) if ls else None
+        if ohlc and (h is None or lo is None):
+            continue
+        by_day[d] = {"d": d, "c": c, "h": h, "l": lo, "v": _vol(vs[i]) if vs else None}
+    bars = [by_day[d] for d in sorted(by_day)]
+    s = session(today)
+    if bars and bars[-1]["d"] == today and s is not None and now.time() < s[1]:
+        return bars[:-1], bars[-1]
+    return bars, None
+
+
+def move_stats(series, now_utc):
+    """Stage 1, closes only -> (dict, None) or (None, why). avg_move_pct is the mean
+    absolute close-to-close move of the last VOL_SESSIONS completed sessions; day_pct
+    is the latest session's move (so far, while it is live). The meta price and volume
+    are used only when the meta's regularMarketTime is on that same IST day (a --now
+    replay, or a meta from a special session, would mix days): otherwise price is the
+    day's close and its turnover is unknown (None). jump: a step in the window that
+    looks like an unadjusted split or bonus (split_like)."""
+    done, live = day_bars(series, now_utc)
+    closes = [b["c"] for b in done]
+    if len(closes) < VOL_SESSIONS + 1:
+        return None, "short"
+    day = (live or done[-1])["d"]
+    meta = series.get("meta") or {}
+    mt = meta.get("regularMarketTime")
+    same_day = isinstance(mt, (int, float)) and math.isfinite(mt) and ts_to_ist(mt).date() == day
+    price = (_pos(meta.get("regularMarketPrice")) if same_day else None) or (live or done[-1])["c"]
+    vol = _vol(meta.get("regularMarketVolume")) if same_day else None
+    if live is not None:
+        day_pct = (price / closes[-1] - 1) * 100
+        steps = [(closes[-1], price)]
+    else:
+        day_pct = (closes[-1] / closes[-2] - 1) * 100
+        steps = []
+    idx = range(len(closes) - VOL_SESSIONS, len(closes))
+    moves = [abs(closes[i] / closes[i - 1] - 1) * 100 for i in idx]
+    steps += [(closes[i - 1], closes[i]) for i in idx]
+    return {"price": price, "day": day, "day_complete": live is None, "day_pct": day_pct,
+            "avg_move_pct": sum(moves) / len(moves), "jump": any(split_like(p, c) for p, c in steps),
+            "turnover_cr": (price * vol / 1e7) if vol is not None else None}, None
+
+
+def atr_stats(series, now_utc, day=None):
+    """Stage 2, a v8 daily chart -> (dict, None) or (None, why). ATR is the SIMPLE
+    average of the last VOL_SESSIONS true ranges of completed sessions (not Wilder's
+    smoothing), as a % of the last completed close. day_range_pct is the high to low
+    of the session dated `day` (stage 1's latest session; so far while it is live),
+    None when the chart has no usable bar for that day. avg_turnover_cr is close x
+    volume over the last TURNOVER_SESSIONS completed sessions that have a volume
+    (at least MIN_TURNOVER_SESSIONS of them). jump: a close-to-close step in the ATR
+    window that looks like an unadjusted split or bonus (split_like); a real crash
+    (CARTRADE 2026-10-28: -12.6 %, true range 21.7 %) is not one."""
+    done, live = day_bars(series, now_utc, ohlc=True)
+    if len(done) < VOL_SESSIONS + 1:
+        return None, "under %d sessions with highs and lows" % (VOL_SESSIONS + 1)
+    win = list(zip(done[-VOL_SESSIONS - 1:-1], done[-VOL_SESSIONS:]))
+    trs = [max(b["h"] - b["l"], abs(b["h"] - p["c"]), abs(b["l"] - p["c"])) for p, b in win]
+    jump = any(split_like(p["c"], b["c"]) for p, b in win)
+    atr = sum(trs) / len(trs)
+    close = done[-1]["c"]
+    last = live or done[-1]
+    rng = (last["h"] - last["l"]) / last["c"] * 100 if day is None or last["d"] == day else None
+    tv = [b["c"] * b["v"] for b in done[-TURNOVER_SESSIONS:] if b["v"] is not None]
+    if len(tv) < MIN_TURNOVER_SESSIONS:
+        return None, "under %d sessions with a volume" % MIN_TURNOVER_SESSIONS
+    return {"atr": atr, "atr_pct": atr / close * 100, "close": close, "day_range_pct": rng, "jump": jump,
+            "avg_turnover_cr": sum(tv) / len(tv) / 1e7, "turnover_sessions": len(tv)}, None
+
+
+def scan_volatile(data, symbols, now_utc, min_price, min_turnover_cr, min_avg_turnover_cr, max_confirm,
+                  confirm=None, top=15):
+    """Pure. data = {SYM: series} (spark or v8). confirm(sym) -> a v8 daily series for
+    stage 2; None means use data[sym] when it has highs and lows. max_confirm and top:
+    0 means all. While the latest session is still open the stage-1 turnover floor is
+    pro-rated by the elapsed part of the session (at least a tenth); a symbol whose day
+    turnover is unknown skips it. The stage-2 20-session average floor always applies.
+    Stage 2 confirms in batches of max_confirm, biggest close-to-close movers first,
+    until `top` liquid hits are found, the candidates run out, or 3 x max_confirm
+    charts were sent. Returns (hits, counts, failed)."""
+    if max_confirm < 0 or top < 0:
+        raise ScanError("max_confirm and top take 0 (all) or a positive number")
+    counts = {"requested": len(symbols), "fetched": 0, "illiquid": 0, "short": 0, "stale": 0, "jump": 0,
+              "scanned": 0, "confirmed": 0, "thin": 0, "hits": 0, "floor_fraction": 1.0,
+              "turnover_unknown": 0}
+    now = to_ist(now_utc)
+    elapsed = (now - datetime.datetime.combine(now.date(), OPEN)).total_seconds() / 60.0
+    frac = max(0.1, min(1.0, elapsed / SESSION_MIN))
+    failed, stats, jumps = {}, [], []
+    for sym in symbols:
+        s = data.get(sym)
+        if not s:
+            continue
+        counts["fetched"] += 1
+        st, why = move_stats(s, now_utc)
+        if st is None:
+            counts["short"] += 1
+            continue
+        stats.append(dict(st, symbol=sym))
+    latest = max((st["day"] for st in stats), default=None)
+    rows = []
+    for st in stats:
+        if st["day"] < latest:  # no bar for the latest session: suspended, delisted or stale data
+            counts["stale"] += 1
+            continue
+        if st["price"] < min_price:
+            counts["illiquid"] += 1
+            continue
+        if st["turnover_cr"] is None:  # meta from another day: the stage-2 average floor decides
+            counts["turnover_unknown"] += 1
+        else:
+            floor = min_turnover_cr
+            if not st["day_complete"]:
+                floor *= frac
+                counts["floor_fraction"] = frac
+            if st["turnover_cr"] < floor:
+                counts["illiquid"] += 1
+                continue
+        if st["jump"]:
+            counts["jump"] += 1
+            jumps.append(st["symbol"])
+            continue
+        counts["scanned"] += 1
+        rows.append(st)
+    rows.sort(key=lambda r: (-r["avg_move_pct"], r["symbol"]))
+    batch = max_confirm or len(rows)
+    cap = min(len(rows), 3 * max_confirm) if max_confirm else len(rows)
+    hits, sent, batches = [], 0, 0
+    while sent < cap and (not top or len(hits) < top):
+        chunk = rows[sent:min(sent + batch, cap)]
+        sent += len(chunk)
+        batches += 1
+        hits.extend(_confirm_batch(chunk, data, now_utc, confirm, min_avg_turnover_cr, counts, failed, jumps))
+    hits.sort(key=lambda h: (-h["atr_pct"], h["symbol"]))
+    counts["sent"], counts["batches"] = sent, batches
+    counts["unconfirmed"] = len(rows) - sent
+    counts["ranked"] = len(hits)
+    counts["jumps"] = sorted(jumps)
+    counts["latest"] = latest.isoformat() if latest else None
+    hits = hits[:top] if top else hits
+    counts["hits"] = len(hits)
+    return hits, counts, failed
+
+
+def _confirm_batch(rows, data, now_utc, confirm, min_avg_turnover_cr, counts, failed, jumps):
+    """Stage 2 for one batch of stage-1 rows -> hits (unsorted). Updates counts, failed, jumps."""
+    hits = []
+    for r in rows:
+        sym = r["symbol"]
+        try:
+            ser = confirm(sym) if confirm else data.get(sym)
+        except ScanError as e:
+            failed[sym] = str(e)
+            continue
+        if not ser or not ser.get("h"):
+            failed[sym] = "no v8 chart with highs and lows"
+            continue
+        a, why = atr_stats(ser, now_utc, r["day"])
+        if a is None:
+            failed[sym] = why
+            continue
+        if a["jump"]:
+            counts["jump"] += 1
+            jumps.append(sym)
+            continue
+        counts["confirmed"] += 1
+        if a["avg_turnover_cr"] < min_avg_turnover_cr:
+            counts["thin"] += 1
+            continue
+        hits.append({"symbol": sym, "price": round(r["price"], 2), "atr": round(a["atr"], 2),
+                     "atr_pct": round(a["atr_pct"], 2), "avg_move_pct": round(r["avg_move_pct"], 2),
+                     "day": r["day"].isoformat(), "day_complete": r["day_complete"],
+                     "day_pct": round(r["day_pct"], 2),
+                     "day_range_pct": None if a["day_range_pct"] is None else round(a["day_range_pct"], 2),
+                     "turnover_cr": None if r["turnover_cr"] is None else round(r["turnover_cr"], 1),
+                     "avg_turnover_cr": round(a["avg_turnover_cr"], 1), "turnover_sessions": a["turnover_sessions"],
+                     "note": "check news" if abs(r["day_pct"]) >= BIG_MOVE else ""})
+    return hits
+
+
 # ---------------------------------------------------------------- opening-range breakout
 
 def slot(day, k):
@@ -857,22 +1112,27 @@ def inr(x, paise=True):
 
 # ---------------------------------------------------------------- commands
 
+def nse_list_text(index, offline_dir=None):
+    """The NSE list for --index (all or nifty500): from offline_dir if given, else NSE's archive."""
+    fname, rel = NSE_LISTS[index]
+    if offline_dir:
+        p = os.path.join(offline_dir, fname)
+        if not os.path.exists(p):
+            raise ScanError("no %s in %s" % (fname, offline_dir))
+        with open(p, encoding="utf-8", errors="replace") as fh:
+            return fh.read()
+    try:
+        return http_get(NSE_URL + rel, timeout=60)
+    except urllib.error.HTTPError as e:
+        raise ScanError("nsearchives.nseindia.com answered HTTP %d for %s" % (e.code, fname))
+    except (urllib.error.URLError, OSError) as e:
+        raise ScanError("could not reach nsearchives.nseindia.com: %s" % getattr(e, "reason", e))
+
+
 def cmd_universe(a):
     t0 = time.time()
-    fname, rel = NSE_LISTS[a.index]
-    if a.offline:
-        p = os.path.join(a.offline, fname)
-        if not os.path.exists(p):
-            raise ScanError("no %s in %s" % (fname, a.offline))
-        with open(p, encoding="utf-8", errors="replace") as fh:
-            text = fh.read()
-    else:
-        try:
-            text = http_get(NSE_URL + rel, timeout=60)
-        except urllib.error.HTTPError as e:
-            raise ScanError("nsearchives.nseindia.com answered HTTP %d for %s" % (e.code, fname))
-        except (urllib.error.URLError, OSError) as e:
-            raise ScanError("could not reach nsearchives.nseindia.com: %s" % getattr(e, "reason", e))
+    fname = NSE_LISTS[a.index][0]
+    text = nse_list_text(a.index, a.offline)
     kept, counts = build_universe(text)
     if not a.no_write:
         d = os.path.dirname(a.out)
@@ -919,7 +1179,8 @@ def cmd_daily(a):
            "note": NOTE, "hits": hits}
     if a.offline:
         doc["offline"] = os.path.basename(a.offline.rstrip("/"))
-    if not a.no_write:
+    wrote = not a.no_write and counts["fetched"] > 0  # nothing fetched: keep the last watchlist
+    if wrote:
         write_json(a.out, doc)
     if a.json:
         print(json.dumps(dict(doc, counts=counts, seconds=round(time.time() - t0, 1)), indent=2))
@@ -946,9 +1207,202 @@ def cmd_daily(a):
                                               ", ".join(LABEL[t] for t in h["setups"])))
     if len(hits) > a.show:
         print("  ... and %d more in the watchlist (--show N for more)." % (len(hits) - a.show))
-    if not a.no_write:
+    if wrote:
         print("Wrote %s (mode daily, %d hit%s)." % (a.out, len(hits), "" if len(hits) == 1 else "s"))
+    elif not a.no_write:
+        print("Nothing was fetched, so %s was left as it was." % a.out)
     print(NOTE + " Next: pick one chart, then /trader-news SYMBOL.")
+    return 0 if hits else 1
+
+
+def _yahoo_doc(doc):
+    """Is this one Yahoo answer (spark or v8 chart), by its shape, not just its key?"""
+    if not isinstance(doc, dict):
+        return False
+    for key in ("spark", "chart"):
+        inner = doc.get(key)
+        if isinstance(inner, dict) and ("result" in inner or "error" in inner):
+            return True
+    return False
+
+
+def _merge_ohlc(data, errors, got, errs):
+    """Merge one loaded doc into data: a v8 chart (highs and lows) wins over a spark entry."""
+    errors.update(errs)
+    for sym, ser in got.items():
+        if sym not in data or (ser.get("h") and not data[sym].get("h")):
+            data[sym] = ser
+
+
+def load_offline_ohlc(path):
+    """Like load_offline, but each file (and each top-level item of a bundle file) is
+    read on its own and, when a symbol is in both a spark answer (closes only) and a
+    v8 chart, the v8 chart wins."""
+    data, errors = {}, {}
+    if os.path.isdir(path):
+        names = sorted(f for f in os.listdir(path) if f.endswith((".json", ".json.gz")))
+        if not names:
+            raise ScanError("no .json files in %s" % path)
+        items = []
+        for f in names:
+            try:
+                doc = json.loads(_read_maybe_gz(os.path.join(path, f)))
+            except ValueError as e:
+                raise ScanError("%s is not valid JSON: %s" % (f, e))
+            items.append((_stem(f) if isinstance(doc, dict) and "chart" in doc else "", doc))
+    elif os.path.isfile(path):
+        try:
+            doc = json.loads(_read_maybe_gz(path))
+        except ValueError as e:
+            raise ScanError("%s is not valid JSON: %s" % (path, e))
+        if _yahoo_doc(doc):
+            items = [("", doc)]
+        elif isinstance(doc, dict):  # a bundle, even one with an item named "spark" or "chart"
+            items = [(k if isinstance(v, dict) and "chart" in v else "", v) for k, v in doc.items()]
+        else:
+            raise ScanError("offline file %s is not a spark answer, a v8 chart or a bundle" % path)
+    else:
+        raise ScanError("no offline file or folder at %s" % path)
+    for hint, doc in items:
+        got, errs = {}, {}
+        _absorb(doc, hint, got, errs)
+        _merge_ohlc(data, errors, got, errs)
+    for sym in data:
+        errors.pop(sym, None)
+    return data, errors
+
+
+def cmd_volatile(a):
+    t0 = time.time()
+    if a.show is not None:
+        raise ScanError("volatile keeps the --top N most volatile: use --top, not --show")
+    if a.max_confirm < 0 or a.top < 0:
+        raise ScanError("--max-confirm and --top take 0 (all) or a positive number")
+    now = parse_now(a.now)
+    data = failed = None
+    offline_syms = None
+    if a.offline:
+        data, failed = load_offline_ohlc(a.offline)
+        offline_syms = sorted(set(data) | set(failed))
+    if a.index:
+        if a.symbols or a.watchlist or a.universe:
+            raise ScanError("--index replaces the symbol list: drop --symbols / --watchlist / --universe")
+        list_dir = None
+        if a.offline:
+            list_dir = a.offline if os.path.isdir(a.offline) else os.path.dirname(os.path.abspath(a.offline))
+            if not os.path.exists(os.path.join(list_dir, NSE_LISTS[a.index][0])):
+                raise ScanError("--index needs an offline folder with %s in it" % NSE_LISTS[a.index][0])
+        kept, _ = build_universe(nse_list_text(a.index, list_dir))
+        symbols = [s for s, _ in kept]
+        if a.limit:
+            symbols = symbols[:a.limit]
+        if not symbols:
+            raise ScanError("no symbols in the %s list" % a.index)
+    else:
+        symbols = read_symbols(a, offline_syms)
+    confirm = None
+    if not a.offline:
+        progress(a, "Stage 1: daily closes for %s symbols (%d spark requests)..."
+                 % ("{:,}".format(len(symbols)), (len(symbols) + SPARK_MAX - 1) // SPARK_MAX))
+        data, failed = fetch_spark(symbols, "1mo", "1d", a.pause, a)
+
+        def confirm(sym):
+            if a.pause:
+                SLEEP(a.pause)
+            return parse_chart(yahoo_get(chart_path(sym, VOL_CHART_RANGE, "1d")), sym)
+    hits, counts, failed2 = scan_volatile(data, symbols, now, a.min_price, a.min_turnover_cr,
+                                          a.min_avg_turnover_cr, a.max_confirm, confirm, a.top)
+    failed = dict(failed or {})
+    nfailed = len([s for s in symbols if s not in data])  # stage 1: no closes at all (offline: not in the files)
+    failed.update(failed2)
+    day = max((h["day"] for h in hits), default=None)
+    complete = all(h["day_complete"] for h in hits)
+    as_of = ("%s %s" % (day, "close" if complete else "so far")) if day else None
+    doc = {"created_by": "trader-scanner", "created_at": now.strftime("%Y-%m-%dT%H:%M:%SZ"), "mode": "volatile",
+           "as_of": as_of, "universe": len(symbols), "scanned": counts["scanned"], "failed": nfailed,
+           "failed_stage2": len(failed2), "unconfirmed": counts["unconfirmed"], "source": "yahoo",
+           "interval": "1d", "corporate_action": counts["jumps"],
+           "filters": {"min_price": a.min_price, "min_turnover_cr": a.min_turnover_cr,
+                       "min_turnover_cr_fraction": round(counts["floor_fraction"], 2),
+                       "min_avg_turnover_cr": a.min_avg_turnover_cr, "sessions": VOL_SESSIONS,
+                       "atr": "simple average of %d true ranges" % VOL_SESSIONS,
+                       "stage2": "the biggest close-to-close movers, %s a batch, at most %s"
+                                 % (a.max_confirm or "all", (3 * a.max_confirm) or "all")},
+           "note": NOTE, "hits": hits}
+    if a.index:
+        doc["index"] = a.index
+    if a.offline:
+        doc["offline"] = os.path.basename(a.offline.rstrip("/"))
+    stage2_failed = counts["confirmed"] == 0 and bool(failed2)  # e.g. Yahoo refused every v8 chart
+    wrote = not a.no_write and counts["fetched"] > 0 and not stage2_failed
+    if wrote:
+        write_json(a.out, doc)
+    if a.json:
+        print(json.dumps(dict(doc, counts=counts, seconds=round(time.time() - t0, 1)), indent=2))
+        return 0 if hits else 1
+    print("Volatility scan, %s IST, daily bars%s (Yahoo)." % (
+        to_ist(now).strftime("%a %Y-%m-%d %H:%M"),
+        (" through %s" % as_of) if as_of else ""))
+    if counts["floor_fraction"] < 1:
+        floor = "₹%s cr+ traded so far: ₹%s cr pro-rated to %d%% of the session" % (
+            _n(round(a.min_turnover_cr * counts["floor_fraction"], 1)), _n(a.min_turnover_cr),
+            round(counts["floor_fraction"] * 100))
+    else:
+        floor = "₹%s cr+ traded on the day" % _n(a.min_turnover_cr)
+    extra = []
+    if counts["turnover_unknown"]:
+        extra.append("%d with no turnover for that day skipped that floor (the average floor still applies)"
+                     % counts["turnover_unknown"])
+    if counts["short"]:
+        extra.append("%d had under %d sessions" % (counts["short"], VOL_SESSIONS + 1))
+    if counts["stale"]:
+        extra.append("%d had no bar for %s (suspended or stale)" % (counts["stale"], counts["latest"]))
+    print("Fetched %s of %s charts%s. %s passed the floors (₹%s+, %s)%s."
+          % ("{:,}".format(counts["fetched"]), "{:,}".format(len(symbols)),
+             (" (%s failed or had no data)" % "{:,}".format(nfailed)) if nfailed else "",
+             "{:,}".format(counts["scanned"]), _n(a.min_price), floor,
+             ("; " + "; ".join(extra)) if extra else ""))
+    print("Stage 2: the %s biggest close-to-close movers sent for real highs and lows%s; %s confirmed%s, %s under "
+          "₹%s cr average daily turnover dropped." % (
+              "{:,}".format(counts["sent"]),
+              (" (%d batches of %d)" % (counts["batches"], a.max_confirm)) if counts["batches"] > 1 else "",
+              "{:,}".format(counts["confirmed"]),
+              (" (%d had no usable daily chart)" % len(failed2)) if failed2 else "",
+              "{:,}".format(counts["thin"]), _n(a.min_avg_turnover_cr)))
+    if counts["unconfirmed"]:
+        print("PARTIAL: %s more liquid charts were not checked (stage 2 stops at %s found or %s sent; "
+              "--max-confirm 0 checks all)." % ("{:,}".format(counts["unconfirmed"]), a.top or "all",
+                                               3 * a.max_confirm))
+    if counts["jumps"]:
+        print("Left out, a price step that matches a split or bonus ratio: %s. Check corporate action "
+              "(split/bonus?)." % ", ".join(counts["jumps"]))
+    if hits:
+        live = "" if complete else " (the latest session is still open: its move and range are so far)"
+        print("Most volatile first, by ATR%% (%d-day average true range / close)%s:" % (VOL_SESSIONS, live))
+        print("  %-11s %11s %7s %8s %8s %9s %11s  %s" % ("symbol", "price", "ATR%", "avg|d|%", "day%",
+                                                       "range%", "avg turnover", "note"))
+        for h in hits:
+            notes = [h["note"]] if h["note"] else []
+            if h["day_range_pct"] is None:
+                notes.append("no range for %s" % h["day"])
+            if h["turnover_sessions"] < TURNOVER_SESSIONS:
+                notes.append("turnover over %d sessions" % h["turnover_sessions"])
+            rng = "%8.2f%%" % h["day_range_pct"] if h["day_range_pct"] is not None else "%9s" % "-"
+            print(("  %-11s %11s %6.2f%% %7.2f%% %+7.2f%% %s %8s cr  %s" % (
+                h["symbol"], inr(h["price"]), h["atr_pct"], h["avg_move_pct"], h["day_pct"], rng,
+                "{:,}".format(int(round(h["avg_turnover_cr"]))), "; ".join(notes))).rstrip())
+        if counts["ranked"] > len(hits):
+            print("  ... %d more passed (--top N for more)." % (counts["ranked"] - len(hits)))
+    else:
+        print("No chart passed every floor.")
+    if wrote:
+        print("Wrote %s (mode volatile, %d hit%s)." % (a.out, len(hits), "" if len(hits) == 1 else "s"))
+    elif not a.no_write and stage2_failed:
+        print("Stage 2 could not confirm any chart (%d failed), so %s was left as it was." % (len(failed2), a.out))
+    elif not a.no_write:
+        print("Nothing was fetched, so %s was left as it was." % a.out)
+    print("Volatile cuts both ways: a wide day means a wide opening range, a far stop and fewer shares. "
+          + NOTE + " Next: /trader-news on the list before the open.")
     return 0 if hits else 1
 
 
@@ -1045,6 +1499,17 @@ def _p(x):
     return inr(x)[1:]
 
 
+def _count(text):
+    """argparse type: 0 or a positive whole number."""
+    try:
+        n = int(text)
+    except ValueError:
+        raise argparse.ArgumentTypeError("%r is not a whole number" % text)
+    if n < 0:
+        raise argparse.ArgumentTypeError("%d: use 0 (all) or a positive number" % n)
+    return n
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description="Chart Scanner (trader-scanner): daily setups and opening-range breakouts.")
     sub = ap.add_subparsers(dest="cmd")
@@ -1057,20 +1522,21 @@ def main(argv=None):
     p.add_argument("--no-write", action="store_true")
     p.add_argument("--json", action="store_true")
 
-    def common(p, min_price, min_volume):
+    def common(p, min_price, min_volume, show=50):
         g = p.add_mutually_exclusive_group()
         g.add_argument("--symbols", help="comma-separated NSE symbols instead of the universe")
         g.add_argument("--watchlist", metavar="FILE", help="a watchlist.json (hits) or a text file of symbols")
         p.add_argument("--universe", help="symbol list, one SYMBOL|Name a line (default %s)" % DEFAULT_UNIVERSE)
         p.add_argument("--limit", type=int, help="scan only the first N symbols")
         p.add_argument("--min-price", type=float, default=min_price, help="rupees (%s)" % _n(min_price))
-        p.add_argument("--min-volume", type=int, default=min_volume)
+        if min_volume is not None:
+            p.add_argument("--min-volume", type=int, default=min_volume)
         p.add_argument("--offline", metavar="PATH", help="fixture folder or file instead of the network")
         p.add_argument("--now", help='pretend it is this time ("2026-10-29 09:45" IST, or ...Z)')
         p.add_argument("--out", default="trader/watchlist.json")
         p.add_argument("--no-write", action="store_true")
         p.add_argument("--pause", type=float, default=PAUSE, help="seconds between requests (%.1f)" % PAUSE)
-        p.add_argument("--show", type=int, default=50, help="hits to print (all are written)")
+        p.add_argument("--show", type=int, default=show, help="hits to print (all are written)")
         p.add_argument("--quiet", action="store_true")
         p.add_argument("--json", action="store_true")
 
@@ -1084,12 +1550,24 @@ def main(argv=None):
     p.add_argument("--at", help="cut the clock at this IST time, HH:MM")
     p.add_argument("--until", help="no new entries after HH:MM IST (default: config no_entries_after, 14:45)")
     p.add_argument("--config", default="trader/config.json")
+    p = sub.add_parser("volatile", help="the most volatile liquid stocks (ATR%%), for tomorrow's watchlist")
+    common(p, 50.0, None, show=None)
+    p.add_argument("--index", choices=sorted(NSE_LISTS),
+                   help="scan NSE's list instead of the universe file: all (EQ series) or nifty500")
+    p.add_argument("--min-turnover-cr", type=float, default=100.0,
+                   help="rupees crore traded on the latest session, stage 1 (100)")
+    p.add_argument("--min-avg-turnover-cr", type=float, default=150.0,
+                   help="average rupees crore a day over %d sessions, stage 2 (150)" % TURNOVER_SESSIONS)
+    p.add_argument("--max-confirm", type=_count, default=VOL_CONFIRM,
+                   help="v8 charts to fetch in stage 2, the biggest close-to-close movers first "
+                        "(%d; 0 = all): stage 2 never sees the rest" % VOL_CONFIRM)
+    p.add_argument("--top", type=_count, default=15, help="hits to keep, most volatile first (15; 0 = all)")
     a = ap.parse_args(argv)
     if not a.cmd:
         ap.print_help()
         return 1
     try:
-        return {"universe": cmd_universe, "daily": cmd_daily, "orb": cmd_orb}[a.cmd](a)
+        return {"universe": cmd_universe, "daily": cmd_daily, "orb": cmd_orb, "volatile": cmd_volatile}[a.cmd](a)
     except ScanError as e:
         print("scan.py: %s" % e, file=sys.stderr)
         return 1

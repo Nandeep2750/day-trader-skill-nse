@@ -67,7 +67,10 @@ A level setup has no opening range to lean on, so it needs a stop you name.
 - **NSE ticks.** Every price the plan writes is on the tick for its price
   band, so the broker will take it: below ₹250 the tick is ₹0.01, below
   ₹1,000 ₹0.05, below ₹5,000 ₹0.10, below ₹10,000 ₹0.50, below ₹20,000 ₹1.00,
-  above that ₹5.00. NSE reviews the bands every month.
+  above that ₹5.00. NSE sets each stock's tick from last month's close, so
+  within 10% of a band edge (₹225 to ₹275, ₹900 to ₹1,100, ₹4,500 to ₹5,500,
+  ₹9,000 to ₹11,000, ₹18,000 to ₹22,000) the plan uses the coarser tick: it is
+  valid in either band.
 - **Rounding never grows the risk.** A long's stop rounds UP to the tick
   (toward the entry), the target rounds DOWN. Risk = entry minus stop.
   Target = entry + R x risk. `2R` by default; `1R`, `1.5R` or `price:X` also

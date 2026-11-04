@@ -12,7 +12,10 @@
     "angel-one": {
       "type": "stdio",
       "command": "npx",
-      "args": ["-y", "angel-one-mcp"],
+      "args": [
+        "-y",
+        "angel-one-mcp"
+      ],
       "env": {
         "ANGEL_API_KEY": "${ANGEL_API_KEY}",
         "ANGEL_CLIENT_ID": "${ANGEL_CLIENT_ID}",

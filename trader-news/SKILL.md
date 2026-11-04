@@ -80,7 +80,7 @@ daily: every board meeting it sees is remembered until its date passes.
 ## Steps
 
 1. Run the check: `python3 "${CLAUDE_SKILL_DIR}/news.py"`. Exit code 1 means
-   nothing new. `--all` shows items already seen, `--json` gives everything
+   nothing new; 2 means every fetch failed (no news is not good news: say so). `--all` shows items already seen, `--json` gives everything
    machine readable, `--dry-run` leaves the state alone.
 2. Read the items that matter: RESULTS DUE first, then every `!` filing,
    anything tagged halt, legal, regulatory or risk, and every MOVING symbol.

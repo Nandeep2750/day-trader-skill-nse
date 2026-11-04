@@ -63,21 +63,22 @@ batch that is fine order by order but breaks a limit together is caught.
 
 | check | blocks when |
 | --- | --- |
-| format | no symbol; side not buy or sell; no whole-share `qty` (NSE has no fractional shares, and a rupee `notional` is refused); type not market or limit; a limit order with no limit price; `time_in_force` not day; `exchange` not NSE; `product` not MIS or CNC; a price off NSE's tick; a bracket that misses its stop-loss or target |
+| format | no symbol; side not buy or sell; no whole-share `qty` (NSE has no fractional shares, and a rupee `notional` is refused); type not market or limit; a limit order with no limit price; `time_in_force` not day; `exchange` not NSE; `product` not MIS or CNC; a price off NSE's tick (near a band edge, off the coarser tick); a bracket that misses its stop-loss or target. Case never matters: "LIMIT" is checked as "limit" |
 | asset | anything but a plain NSE symbol (RELIANCE, M&M, BAJAJ-AUTO): a `.BO` (BSE) or `.NS` (Yahoo) suffix, or a symbol that does not look like NSE's |
-| short | a sell of more than you hold (`allow_short` false) |
+| short | a sell of more than you hold. Short selling is not supported end to end yet (trader-broker cannot protect a short), so this blocks even with `allow_short` true |
 | blocked | (entries) the symbol is on the `blocked` list |
 | product | (entries) CNC (delivery) while `allow_delivery` is false: entries are MIS (intraday) |
 | size | (entries) under `min_order_inr` or over `max_order_inr` |
 | position | (entries) the stock would be over `max_position_pct` of the account |
 | cash | (entries) the buy would leave less than the cash buffer, or need margin (`allow_margin` false). With `allow_margin` true an MIS buy needs `mis_margin_pct` (20) of its value |
-| stop | (entries) no stop while `require_stop` is true (a bracket `stop_loss_stop_price`, or the order's plan stop); a stop on the wrong side of the entry |
+| stop | (entries) no stop while `require_stop` is true (a bracket `stop_loss_stop_price`, or the order's plan stop); a stop on the wrong side of the entry; a fresh price already at or below the stop; on a live account, a stop only in the plan (no exchange stop: use a bracket order) |
+| price | (entries) a market order with neither a fresh price (under 15 minutes) nor a fresh plan entry. The plan's entry counts only while it is under 15 minutes old, timed by the OLDER of the plan's `created_at` and its date and entry time (the entry bar's time is the price's time, so a plan written at 10:00 from a 9:40 trigger is as old as 9:40) |
 | loss | (entries) qty x (entry minus stop), plus estimated round-trip charges (`include_charges`), over `max_loss_per_trade_inr` |
 | reward:risk | (entries) (target minus entry) / (entry minus stop) under `min_reward_risk` |
 | daily loss | (entries) the max losses (charges included) of today's entries, plus this one, over `max_daily_loss_inr` |
 | trades | (entries) `max_trades_per_day` entries already placed today |
-| window | (entries) before `no_entries_before` or after `no_entries_after` (IST), or NSE is closed |
-| duplicate | (entries) the same symbol and side twice in one batch, or already placed today |
+| window | (entries) NSE is closed (always, even with the bounds blank), or before `no_entries_before` or after `no_entries_after` (IST) |
+| duplicate | (entries) the same symbol and side twice in one batch, or already placed (or approved and not yet resolved) today |
 | daily limit | (entries) `max_orders_per_day` orders already placed today |
 
 How the numbers work:
@@ -90,27 +91,45 @@ How the numbers work:
 - **NSE's tick**: 0.01 under Rs 250, 0.05 to Rs 1,000, 0.10 to Rs 5,000, 0.50
   to Rs 10,000, 1.00 to Rs 20,000, 5.00 above. The exchange rejects a price
   off the tick, so the check blocks it first and names the two nearest valid
-  prices. trader-exit and trader-budget already write prices on the tick.
+  prices. NSE sets each stock's tick from last month's close, which the pack
+  does not know, so within 10% of a band edge (225 to 275, 900 to 1,100, 4,500
+  to 5,500, 9,000 to 11,000, 18,000 to 22,000) only the coarser tick passes: it
+  is valid in either band. trader-exit and trader-budget already round that way.
 - **Estimated charges** (same formula as trader-budget): brokerage at the
   config's broker (Zerodha 0.03% capped at Rs 20 an order; Angel One 0.1%, Rs 5
   to Rs 20), STT 0.025% of the sell, NSE transaction charge, SEBI fee, stamp
   duty 0.003% of the buy, GST 18%. An estimate: the contract note is the truth.
 - **Daily loss** counts the full max loss of every entry placed today, win or
-  lose, as trader-broker logged it (charges included). Three full-size trades
-  of about Rs 1,000 use up a Rs 3,000 day.
+  lose, as trader-broker logged it (charges included), and of every entry the
+  user said yes to that has not come back placed, denied or failed yet. A
+  logged entry with no max loss counts as a full `max_loss_per_trade_inr`.
+  The order being checked never counts against itself: re-checking an order
+  already approved or placed leaves its own records out (matched by
+  fingerprint). Three full-size trades of about Rs 1,000 use up a Rs 3,000 day.
+- **Paper or live**: live only when the config says `"paper": false`, literally.
+  Anything else (missing, null, "false" as text) is paper.
 - **The window** is IST (UTC+5:30, no daylight saving), worked out in the tool,
   never from the computer's clock zone. The NSE session is 9:15 to 15:30.
   Weekends and NSE holidays are closed. The holiday list covers 2026; for
   another year it warns you to check nseindia.com. Muhurat trading and other
-  special sessions are not modelled. Set both `no_entries_*` to null to switch
-  the window off.
+  special sessions are not modelled. Setting both `no_entries_*` to null
+  widens the window to the whole session; it never lets an entry through
+  while NSE is closed.
+- **The fingerprint** in `trader/state/risk.json` covers the order's fields
+  (case-normalised), its plan's entry, stop and target, the stop a flatten
+  cancels, and the config's product, broker and paper flag. Each verdict also
+  carries `checked_at` and the all-in `max_loss`. trader-broker refuses an
+  entry whose PASS is more than 5 minutes old or past `no_entries_after`, so
+  check again right before asking the user.
 
-Warnings do not block, but say them to the user: a LIVE account, a flat_by at
+Warnings do not block, but say them to the user: a LIVE account, a plan entry
+too old to use, a flat_by at
 or after the broker's MIS auto square-off (Zerodha 15:20, Angel One 15:15; the
 broker would close the position at the market and charge a fee), an order
 with no exchange or product (taken as NSE and the config's product), a stop
-that lives only in the plan and not at the broker, a price too old to use, a
-date outside the holiday list.
+that lives only in the plan and not at the broker (paper only; live, it
+blocks), a price too old to use, a date outside the holiday list, a logged
+entry with no max loss (counted in full).
 
 ## Steps
 

@@ -43,6 +43,9 @@ remembers what you have seen (30 days), so an item shows once. Offline:
 nse-announcements.xml, nse-board-meetings.xml and EQUITY_L.csv from DIR.
 The tests use it.
 
+Exit code 0 when there is something new, 1 when nothing is new, 2 on bad
+input or when every source fetch failed (so "nothing new" is never a guess).
+
 Headlines are leads, not facts: open the story or the filing before acting,
 and treat nothing here as advice.
 """
@@ -192,8 +195,18 @@ class Fetcher(object):
         self.offline = offline
         self.pause = pause
         self._last = 0.0
+        self.attempts = 0   # every fetch tried, and how many of them failed: all failed means exit 2
+        self.failures = 0
 
     def get(self, url, name):
+        self.attempts += 1
+        try:
+            return self._get(url, name)
+        except NewsError:
+            self.failures += 1
+            raise
+
+    def _get(self, url, name):
         if self.offline:
             path = os.path.join(self.offline, name)
             if not os.path.isfile(path):
@@ -719,6 +732,8 @@ def main(argv=None):
         with open(args.state, "w", encoding="utf-8") as fh:
             json.dump(state, fh, indent=2)
             fh.write("\n")
+    if fetcher.attempts and fetcher.failures == fetcher.attempts:
+        return 2  # every source failed: "nothing new" would be a lie
     return 0 if any(i["new"] for i in shown) else 1
 
 

@@ -12,8 +12,11 @@ description: >-
   says "scan the market", "scan NSE", "find me setups", "what is breaking
   out", "opening range breakouts", "scan for bull flags", "oversold stocks",
   "pre-market scan", "build my watchlist", "scan the NIFTY 500", "what should
-  I look at today", or at the start of a trading day before /trader-news.
-argument-hint: "[universe | daily | orb] [--at HH:MM]"
+  I look at today", "high volatility stocks", "most volatile stocks for
+  tomorrow", "what moves the most", or at the start of a trading day before
+  /trader-news. Also ranks the most volatile liquid stocks by ATR % for
+  tomorrow's watchlist.
+argument-hint: "[universe | daily | orb | volatile] [--at HH:MM]"
 ---
 
 # trader-scanner
@@ -35,10 +38,14 @@ python3 "${CLAUDE_SKILL_DIR}/scan.py" daily --symbols RELIANCE,INFY,M&M # or --w
 python3 "${CLAUDE_SKILL_DIR}/scan.py" orb                               # after 9:35 AM IST -> trader/watchlist.json
 python3 "${CLAUDE_SKILL_DIR}/scan.py" orb --at 09:45                    # cut the clock at 9:45 AM IST
 python3 "${CLAUDE_SKILL_DIR}/scan.py" orb --watchlist trader/watchlist.json --json
+python3 "${CLAUDE_SKILL_DIR}/scan.py" volatile --index nifty500         # after the close: most volatile liquid stocks
+python3 "${CLAUDE_SKILL_DIR}/scan.py" volatile --symbols CARTRADE,AEGISLOG --top 5
 ```
 
 Flags: `--min-price 50` (rupees) and `--min-volume` (daily 5,00,000 shares,
 orb 0), `--or-minutes 15`, `--max-confirm 200` (orb stage 2),
+`volatile`: `--min-turnover-cr 100`, `--min-avg-turnover-cr 150`,
+`--max-confirm 30`, `--top 15`, `--index all|nifty500`.
 `--now "2026-10-29 09:45"` (IST) to pin the clock, `--offline PATH` to read
 saved files, `--no-write`, `--show N`, `--json`. Exit code 0 when the scan
 found something, 1 when it found nothing or could not run (the reason is one
@@ -54,7 +61,7 @@ with `&` in it: `--symbols "M&M,RELIANCE"`.
 | file | what |
 | --- | --- |
 | `trader/universe.txt` | written by `universe`: one `SYMBOL\|Name` a line, read by `daily` and `orb` |
-| `trader/watchlist.json` | written by `daily` and `orb`: `mode`, `as_of`, `universe`, `scanned`, `failed`, `hits[]`. trader-news and trader-entry read `hits[].symbol` |
+| `trader/watchlist.json` | written by `daily`, `orb` and `volatile`: `mode`, `as_of`, `universe`, `scanned`, `failed`, `hits[]`. trader-news and trader-entry read `hits[].symbol` |
 | `trader/config.json` | read by `orb`: `no_entries_after` (default 14:45) |
 
 ## The universe
@@ -130,6 +137,33 @@ Before 9:35 AM, on a weekend or an NSE holiday, after the 3:30 PM close, or
 after `no_entries_after` (an expired setup) it prints one plain line and
 writes nothing.
 
+## The volatility scan (after the close, for tomorrow)
+
+For "which stocks move the most?". Stage 1 reads a month of daily closes
+(spark, 20 symbols a request) and works out each stock's average absolute
+daily move over the last 14 completed sessions, the latest session's move and
+its turnover (price x volume, in crore). Floors: last price at least
+`--min-price` (Rs 50) and at least `--min-turnover-cr` (Rs 100 crore) traded
+in the latest session. Stage 2 fetches a 1-month daily v8 chart (real highs
+and lows) for the `--max-confirm` (30) biggest average movers:
+
+- ATR % = the simple average of the last 14 true ranges (high to low, or the
+  gap from the previous close when bigger; not Wilder's smoothing), divided by
+  the last completed close.
+- The latest session's high-to-low range %.
+- Average turnover over the last 20 completed sessions, floor
+  `--min-avg-turnover-cr` (Rs 150 crore): a stock that only traded big once is out.
+
+Ranked by ATR %, the top `--top` (15) are printed and written to
+`trader/watchlist.json` (mode `volatile`). A session move of 5 % or more gets
+"check news": something moved it, and it can gap again at the open. Run it
+after the 3:30 PM close; during the session today's bar is left out of the
+ATR and averages, and its move and range are labelled "so far".
+
+Say plainly what volatile means for a day trade: a wide daily range means a
+wide opening range, a stop further away and, at the same max loss, fewer
+shares. It is not a list of stocks to buy.
+
 ## Data and limits
 
 - Yahoo's chart and spark endpoints are free, unofficial and can lag. Bars are
@@ -151,7 +185,10 @@ writes nothing.
 3. After 9:35 AM IST (9:45 is a good first look): `scan.py orb`. Tell the
    user how many usable charts broke their range and when, and that a later
    hit is closer to the price now.
-4. The user picks one chart. Hand it on: `/trader-news SYMBOL` (what is
+4. For tomorrow's list (after the close): `scan.py volatile --index
+   nifty500`. Show the table, point at any "check news", and say that a
+   volatile stock means a wider stop and fewer shares.
+5. The user picks one chart. Hand it on: `/trader-news SYMBOL` (what is
    moving it), then `/trader-entry SYMBOL` (the entry bar by bar). Never pick
    for them.
 

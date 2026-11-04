@@ -17,7 +17,7 @@
       "order_class": "bracket",
       "take_profit_limit_price": "1240.20",
       "stop_loss_stop_price": "1215.40",
-      "why": "opening-range breakout on RELIANCE: 65 shares, bound by your max order of 80,000 (65 x 12.40 = 806 at the stop)",
+      "why": "opening-range breakout on RELIANCE: 65 shares, bound by your max order of 80,000 (65 x 12.40 = 806 at the stop, 867.17 with charges)",
       "plan": {
         "entry": 1227.8,
         "stop": 1215.4,

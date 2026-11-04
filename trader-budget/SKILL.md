@@ -87,7 +87,9 @@ python3 "${CLAUDE_SKILL_DIR}/size.py" --write
 First the prices go on NSE's tick, rounded so the risk never grows: the stop
 UP, the target DOWN, a buy limit DOWN. The tick is 0.01 under Rs 250, 0.05 to
 Rs 1,000, 0.10 to Rs 5,000, 0.50 to Rs 10,000, 1.00 to Rs 20,000 and 5.00
-above (NSE reviews the bands monthly).
+above. NSE sets each stock's tick from last month's close, so within 10% of a
+band edge (225 to 275, 900 to 1,100, 4,500 to 5,500, 9,000 to 11,000, 18,000 to
+22,000) the coarser tick is used: it is valid in either band.
 
 Whole shares only: NSE has no fractional shares. The size is the largest
 whole number that fits all four limits:

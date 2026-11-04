@@ -27,7 +27,10 @@ How many shares. Whole shares only: NSE has no fractional shares.
 
 Prices go on NSE's tick (0.01 under Rs 250, 0.05 to Rs 1,000, 0.10 to Rs 5,000,
 0.50 to Rs 10,000, 1.00 to Rs 20,000, 5.00 above), rounded so the risk never
-grows: the stop rounds UP, the target DOWN, a buy limit DOWN.
+grows: the stop rounds UP, the target DOWN, a buy limit DOWN. NSE sets each
+stock's tick from last month's close, so within 10% of a band edge (225 to 275,
+900 to 1,100, 4,500 to 5,500, 9,000 to 11,000, 18,000 to 22,000) the coarser
+tick is used: it is valid in either band.
 
 Estimated charges: an NSE intraday round trip (buy at the entry, sell at the
 stop) at your broker's rates: brokerage (Zerodha 0.03% capped at Rs 20 an order;
@@ -106,6 +109,11 @@ NSE_SYMBOL = re.compile(r"^[A-Z0-9][A-Z0-9&\-]{0,19}$")
 
 # NSE cash tick sizes in paise: a price below X rupees moves in steps of this many paise
 TICKS = ((250, 1), (1000, 5), (5000, 10), (10000, 50), (20000, 100), (None, 500))
+# NSE fixes each stock's tick from the previous month's close, which this pack does not know. Within
+# 10% of a band edge the stock could sit in either band, so prices there go on the coarser tick (a
+# price on the coarser tick is also on the finer one).
+BAND_EDGES = (250, 1000, 5000, 10000, 20000)
+EDGE_ZONE = 0.10
 
 # NSE equity intraday charges (estimates; "charges" in the config overrides any of them)
 CHARGES = {
@@ -312,13 +320,23 @@ def round_paise(x):
     return paise(x) / 100.0
 
 
-def tick_paise(price):
-    """NSE's tick, in paise, for a price in rupees."""
+def band_tick_paise(price):
+    """NSE's tick, in paise, for the band a price is in."""
     p = paise(price)
     for below, tick in TICKS:
         if below is None or p < below * 100:
             return tick
     return TICKS[-1][1]
+
+
+def tick_paise(price):
+    """The safe tick, in paise: the band's tick, or the coarser one within 10% of a band edge."""
+    t = band_tick_paise(price)
+    p = float(price)
+    for edge in BAND_EDGES:
+        if edge * (1 - EDGE_ZONE) <= p <= edge * (1 + EDGE_ZONE):
+            t = max(t, band_tick_paise(edge))
+    return t
 
 
 def to_tick(price, direction):
@@ -558,7 +576,8 @@ def size_trade(plan, cfg, budget=None, limit=None, price=None, cash=None, today=
                    % (qty, "" if qty == 1 else "s", sym, inr(cost), inr(c["min_order_inr"])))
     return {
         "symbol": sym, "exchange": "NSE", "side": "buy", "setup": plan.get("setup", ""), "date": plan.get("date"),
-        "entry_time": plan.get("entry_time", ""), "entry_plan": round_paise(entry_plan),
+        "entry_time": plan.get("entry_time", ""), "plan_created_at": plan.get("created_at"),
+        "entry_plan": round_paise(entry_plan),
         "entry": ref, "entry_from": ref_from, "stop": stop, "target": target,
         "risk_per_share": risk, "reward_risk": round(reward_c / float(risk_c), 2),
         "stop_label": plan.get("stop_label", ""), "target_label": plan.get("target_label", ""),
@@ -596,8 +615,11 @@ def bracket_order(s):
         "plan": {"entry": s["entry"], "stop": s["stop"], "target": s["target"],
                  "risk_per_share": s["risk_per_share"], "loss_at_stop": s["loss_at_stop"],
                  "charges": s["charges"], "max_loss": s["max_loss"], "broker": s["broker"],
-                 "setup": s["setup"], "entry_time": s["entry_time"], "flat_by": s["flat_by"]},
+                 "setup": s["setup"], "date": s["date"], "entry_time": s["entry_time"],
+                 "flat_by": s["flat_by"]},
     })
+    if s["plan_created_at"]:
+        o["plan"]["created_at"] = s["plan_created_at"]   # when the plan's entry price is from (trader-risk)
     return o
 
 
@@ -913,7 +935,7 @@ def write_orders(path, orders, cfg, source="", now_utc=None):
         "created_by": "trader-budget",
         "created_at": utc_iso(now_utc),
         "status": "proposed",
-        "paper": bool(cfg.get("paper", True)),
+        "paper": cfg.get("paper", True) is not False,   # live only when "paper" is literally false
         "broker": str(cfg.get("broker") or "zerodha"),
         "note": ("Proposals only. Nothing is placed until trader-risk passes each order "
                  "and you say yes to it in the chat."),

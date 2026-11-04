@@ -29,6 +29,7 @@
         "max_loss": 759.77,
         "broker": "zerodha",
         "setup": "orb",
+        "date": "2026-10-29",
         "entry_time": "9:40 AM",
         "flat_by": "15:10"
       }

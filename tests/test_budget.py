@@ -108,7 +108,7 @@ class TheWalkthrough(unittest.TestCase):
             "take_profit_limit_price": "1185.20", "stop_loss_stop_price": "1163.40",
             "plan": {"entry": 1174.30, "stop": 1163.40, "target": 1185.20, "risk_per_share": 10.90,
                      "loss_at_stop": 686.70, "charges": 73.07, "max_loss": 759.77, "broker": "zerodha",
-                     "setup": "orb", "entry_time": "9:40 AM", "flat_by": "15:10"}})
+                     "setup": "orb", "date": "2026-10-29", "entry_time": "9:40 AM", "flat_by": "15:10"}})
         self.assertIn("bound by your position cap", why)
         self.assertIn("₹686.70 at the stop + ₹73.07 estimated charges = ₹759.77", why)
 
@@ -159,7 +159,18 @@ class Ticks(unittest.TestCase):
     def test_tick_bands(self):
         for price, tick in ((99.99, 1), (249.99, 1), (250.00, 5), (999.95, 5), (1000.00, 10), (4999.90, 10),
                             (5000.00, 50), (10000.00, 100), (20000.00, 500), (31000.00, 500)):
+            self.assertEqual(size.band_tick_paise(price), tick, price)
+
+    def test_the_coarser_tick_near_a_band_edge(self):
+        # NSE fixes a stock's tick from last month's close: within 10% of an edge either band is possible
+        for price, tick in ((224.99, 1), (225.00, 5), (249.99, 5), (275.00, 5), (899.95, 5), (900.00, 10),
+                            (1100.00, 10), (1174.30, 10), (4500.00, 50), (9000.00, 100), (18000.00, 500)):
             self.assertEqual(size.tick_paise(price), tick, price)
+        self.assertEqual(size.to_tick(241.03, "up"), 241.05)
+        self.assertEqual(size.to_tick(991.27, "down"), 991.20)
+        s = size.size_trade(plan(symbol="ZEEL", entry=241.05, stop=238.52, target=246.17),
+                            cfg(max_position_pct=100), today=TODAY)
+        self.assertEqual((s["stop"], s["target"]), (238.55, 246.15))
 
     def test_rounding_never_grows_the_risk(self):
         self.assertEqual(size.to_tick(1163.35, "up"), 1163.40)

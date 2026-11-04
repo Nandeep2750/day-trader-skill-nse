@@ -1,6 +1,6 @@
 {
   "name": "day-trader-skill-nse",
-  "description": "9 Claude skills for day trading on NSE: scan thousands of charts, track breaking news, time every entry and exit, and replay every outcome before you risk a rupee.",
+  "description": "10 Claude skills for day trading on NSE: scan thousands of charts, track breaking news, time every entry and exit, and replay every outcome before you risk a rupee.",
   "version": "2.0.0-nse.1",
   "author": {
     "name": "Jake Schincariol (original pack), NSE port",

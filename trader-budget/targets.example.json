@@ -1,10 +1,30 @@
 {
   "source": "An example split across five NIFTY 50 stocks, for trying weights mode. Not a recommendation.",
   "weights": [
-    {"ticker": "RELIANCE", "name": "Reliance Industries", "weight": 30},
-    {"ticker": "HDFCBANK", "name": "HDFC Bank", "weight": 25},
-    {"ticker": "INFY", "name": "Infosys", "weight": 20},
-    {"ticker": "ITC", "name": "ITC", "weight": 15},
-    {"ticker": "TCS", "name": "Tata Consultancy Services", "weight": 10}
+    {
+      "ticker": "RELIANCE",
+      "name": "Reliance Industries",
+      "weight": 30
+    },
+    {
+      "ticker": "HDFCBANK",
+      "name": "HDFC Bank",
+      "weight": 25
+    },
+    {
+      "ticker": "INFY",
+      "name": "Infosys",
+      "weight": 20
+    },
+    {
+      "ticker": "ITC",
+      "name": "ITC",
+      "weight": 15
+    },
+    {
+      "ticker": "TCS",
+      "name": "Tata Consultancy Services",
+      "weight": 10
+    }
   ]
 }
