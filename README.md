@@ -142,7 +142,7 @@ python3 trader-alerts/alerts.py add --from-plan                        # stop, t
 python3 trader-alerts/alerts.py check                                  # rings what hit, once
 python3 trader-autopilot/autopilot.py install --project ~/paper-test   # writes a launchd plist, prints the command to load it
 python3 trader-autopilot/autopilot.py status                           # what the autopilot did today
-python3 trader-autopilot/dashboard.py --project ~/paper-test --open    # live dashboard on 127.0.0.1:8765
+python3 trader-autopilot/dashboard.py --project ~/paper-test --open    # live dashboard on 127.0.0.1:8765, past days at /?date=YYYY-MM-DD
 ```
 
 `--now "2026-10-29 09:40"` pins any tool's clock (IST). Config lives in
