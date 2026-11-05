@@ -286,7 +286,9 @@ class PlanRules(unittest.TestCase):
         for p, word in ((plan(stop=1175.0), "not below the entry"),
                         (plan(target=1170.0), "already happened"),
                         (plan(target=None), "positive target"),
-                        (plan(side="sell"), "long (buy) day trades only"),
+                        (plan(side="hedge"), "side is buy or sell"),
+                        # a sell plan with a long's geometry: its stop belongs above the entry
+                        (plan(side="sell"), "a short trade needs its stop above it"),
                         (plan(symbol=""), "no symbol"),
                         (plan(symbol="RELIANCE.BO"), "BSE symbol"),
                         (plan(symbol="BTC/INR"), "does not look like an NSE symbol")):
@@ -459,3 +461,64 @@ class WeightsMode(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ShortSizing(unittest.TestCase):
+    """A short is sized on the broker's intraday margin, and only with explicit consent."""
+
+    # INFY's real breakdown on 2026-10-29: entry 1127.15, stop above it, target below
+    SHORT = {"symbol": "INFY", "side": "sell", "entry": 1127.15, "stop": 1133.30, "target": 1114.90,
+             "setup": "orb_down", "date": "2026-10-29", "flat_by": "15:00"}
+
+    def size(self, **over):
+        over.setdefault("mis_margin_pct", 20)
+        return size.size_trade(dict(self.SHORT), cfg(allow_margin=True, **over), today="2026-10-29")
+
+    def test_the_risk_is_the_stop_above_the_entry(self):
+        s = self.size()
+        self.assertEqual(s["side"], "sell")
+        self.assertAlmostEqual(s["risk_per_share"], 6.15, places=2)
+        self.assertGreater(s["stop"], s["entry"])
+        self.assertLess(s["target"], s["entry"])
+
+    def test_the_cash_limit_uses_the_mis_margin(self):
+        s = self.size()
+        cash = [l for l in s["limits"] if l["name"] == "cash"][0]
+        self.assertIn("MIS margin", cash["how"])
+        # at 20% margin the cash limit allows about five times the shares full cash would
+        full = [l for l in self.size(mis_margin_pct=100)["limits"] if l["name"] == "cash"][0]
+        self.assertAlmostEqual(cash["shares"] / full["shares"], 5, delta=0.1)
+
+    def test_a_short_needs_allow_margin(self):
+        with self.assertRaises(size.SizeError) as e:
+            size.size_trade(dict(self.SHORT), cfg(allow_margin=False), today="2026-10-29")
+        self.assertIn('needs "allow_margin": true', str(e.exception))
+        self.assertIn("5 times the notional", str(e.exception))
+
+    def test_a_short_has_to_be_intraday(self):
+        with self.assertRaises(size.SizeError) as e:
+            size.size_trade(dict(self.SHORT), cfg(allow_margin=True, product="CNC", allow_delivery=True),
+                            today="2026-10-29")
+        self.assertIn("a short has to be intraday", str(e.exception))
+        self.assertIn("goes to auction", str(e.exception))
+
+    def test_the_charge_legs_reverse(self):
+        """A short sells at the entry and buys at the stop, so STT lands on the entry leg."""
+        s = self.size()
+        q = s["qty"]
+        mine = size.round_trip_charges(cfg(), q * s["stop"], q * s["entry"])
+        self.assertAlmostEqual(s["charges"], mine["total"], places=2)
+        long_way = size.round_trip_charges(cfg(), q * s["entry"], q * s["stop"])
+        self.assertNotAlmostEqual(long_way["stt"], mine["stt"], places=2)
+
+    def test_the_order_and_the_report_say_sell(self):
+        s = self.size()
+        o = size.bracket_order(s)
+        self.assertEqual(o["side"], "sell")
+        text = size.plan_report(s, o)
+        if not isinstance(text, str):
+            text = "\n".join(text)
+        self.assertIn("INFY (NSE) sell", text)
+        self.assertIn("sell %s INFY on NSE" % o["qty"], text)
+        self.assertIn("can fill above", text)
+        self.assertIn("(stop 1133.30 minus entry 1127.15)", text)

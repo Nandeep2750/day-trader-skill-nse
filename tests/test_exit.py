@@ -274,13 +274,14 @@ class Cli(unittest.TestCase):
         self.assertIn("level setup has no opening-range stop", err)
         self.assertEqual(self.plan("--stop", "pct:1")[0], 0)
 
-        code, _, err = self.plan("--side", "sell")
-        self.assertIn("v2 plans longs only", err)
-        self.write(os.path.join("trader", "entry.json"), dict(WALK_ENTRY, side="sell"))
+        # a side the pack does not know is still refused
+        self.write(os.path.join("trader", "entry.json"), dict(WALK_ENTRY, side="hedge"))
         code, _, err = self.plan()
-        self.assertIn("longs only", err)
+        self.assertIn("it is buy or sell", err)
+        # a short's stop goes above the entry, so a stop under it is the refusal now
+        self.write(os.path.join("trader", "entry.json"), dict(WALK_ENTRY, side="sell"))
         code, _, err = self.plan("--stop", "price:1174.10")
-        self.assertIn("longs only", err)
+        self.assertIn("a short's stop goes above the entry", err)
         os.remove(os.path.join("trader", "entry.json"))
         code, _, err = self.plan()
         self.assertIn("no entry", err)
@@ -359,3 +360,67 @@ class SkillDoc(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ShortGeometry(unittest.TestCase):
+    """A short mirrors a long: stop above the entry rounding DOWN toward it, target below
+    rounding UP, risk = stop - entry."""
+
+    # INFY's real breakdown on 2026-10-29: closed 1127.15, opening range 1128.80 to 1137.95
+    E, OH, OL = 1127.15, 1137.95, 1128.80
+
+    def short(self, entry=None, stop="or_mid", param=None, target=("r", "2"), oh=None, ol=None, **kw):
+        t_rule, t_param = target
+        return exitp.compute(self.E if entry is None else entry, stop, param, t_rule,
+                                exitp.D(t_param), self.OH if oh is None else oh,
+                                self.OL if ol is None else ol, side="sell", **kw)
+
+    def test_the_or_mid_stop_sits_above_the_entry_and_rounds_toward_it(self):
+        c = self.short()
+        self.assertEqual(str(c["stop"]), "1133.30")          # 1133.375 rounded DOWN, toward the entry
+        self.assertGreater(c["stop"], c["entry"])
+        self.assertIn("rounded down to the", c["stop_detail"])
+        self.assertEqual(str(c["risk"]), "6.15")             # stop - entry
+
+    def test_the_target_sits_below_the_entry_and_never_over_promises(self):
+        c = self.short()
+        self.assertEqual(str(c["target"]), "1114.90")        # rounded UP, so it asks for less
+        self.assertLess(c["target"], c["entry"])
+        self.assertLessEqual(c["reward_risk"], exitp.D("2"))
+
+    def test_an_or_low_rule_becomes_the_or_high_for_a_short(self):
+        c = self.short(stop="or_low")
+        self.assertEqual(c["stop_label"], "opening-range high")
+        # 1137.95 is not on the ₹0.10 tick, so it rounds down to 1137.90: toward the entry
+        self.assertEqual(str(c["stop"]), "1137.90")
+        self.assertLess(c["stop"], exitp.cents(self.OH))
+
+    def test_pct_and_atr_stops_go_the_other_way(self):
+        c = self.short(entry=1000.0, stop="pct", param=exitp.D("1"))
+        self.assertEqual(str(c["stop"]), "1010.00")
+        self.assertIn("above the entry", c["stop_label"])
+        c = self.short(entry=1000.0, stop="atr", param=exitp.D("1.5"), atr=8.0, atr_bars=14)
+        self.assertEqual(str(c["stop"]), "1012.00")
+        self.assertIn("above the entry", c["stop_label"])
+
+    def test_a_stop_under_a_short_entry_is_refused(self):
+        with self.assertRaises(exitp.PlanError) as cm:
+            self.short(stop="price", param=exitp.D("1120.00"))
+        self.assertIn("a short's stop goes above the entry", str(cm.exception))
+
+    def test_a_target_above_a_short_entry_is_refused(self):
+        with self.assertRaises(exitp.PlanError) as cm:
+            self.short(target=("price", "1200.00"))
+        self.assertIn("a short's target goes below it", str(cm.exception))
+
+    def test_a_short_stop_too_tight_to_survive_the_spread_is_refused(self):
+        with self.assertRaises(exitp.PlanError) as cm:
+            self.short(stop="price", param=exitp.D("1127.20"))
+        self.assertIn("too tight to survive the spread", str(cm.exception))
+        self.assertIn("above the entry", str(cm.exception))
+
+    def test_the_long_side_is_untouched(self):
+        c = exitp.compute(1174.30, "or_mid", None, "r", exitp.D("2"), 1170.50, 1156.20)
+        self.assertEqual(str(c["stop"]), "1163.40")          # as it always was: rounded UP
+        self.assertGreater(c["target"], c["entry"])
+        self.assertIn("rounded up to the", c["stop_detail"])

@@ -4,6 +4,7 @@ import json
 import os
 import tempfile
 import unittest
+from unittest import mock
 from contextlib import redirect_stdout, redirect_stderr
 
 from _load import load, ROOT, FIX
@@ -533,17 +534,64 @@ class DayTradeChecks(unittest.TestCase):
         self.assertEqual(at("2026-10-29 09:40"), datetime.datetime(2026, 10, 29, 4, 10))
         self.assertEqual(at("2026-03-10 09:40"), datetime.datetime(2026, 3, 10, 4, 10))   # no DST in India
 
-    def test_short_entries_are_blocked_even_when_allowed(self):
+    def test_a_short_entry_has_to_clear_every_gate(self):
         short = {"symbol": "RELIANCE", "exchange": "NSE", "side": "sell", "qty": "63", "type": "market",
                  "time_in_force": "day", "product": "MIS", "order_class": "bracket",
                  "take_profit_limit_price": "1163.40", "stop_loss_stop_price": "1185.20",
                  "plan": {"entry": 1174.30}}
-        res = self.one(short)
+
+        def one(**cfg):
+            # the F&O list is NSE's, over the network: pin it so the test stays offline
+            with mock.patch.object(check, "fno_eligible", return_value=cfg.pop("fno", True)):
+                return self.one(short if "order" not in cfg else cfg.pop("order"), **cfg)
+
+        # selling what you do not hold is a short, and off by default
+        res = one()
         self.assertIn("short: selling more RELIANCE than you hold", reasons(res))
-        res = self.one(short, allow_short=True)       # shorts are blocked until trader-broker can protect one
+        self.assertIn('Set "allow_short": true', reasons(res))
+
+        # allow_short alone is not enough: a short is the broker's intraday margin
+        res = one(allow_short=True)
         self.assertEqual(verdicts(res), ["BLOCK"])
-        self.assertIn("not supported end to end yet", reasons(res))
-        self.assertIn('even with "allow_short": true', reasons(res))
+        self.assertIn('needs "allow_margin": true as well', reasons(res))
+
+        # a scrip with no F&O contracts can never be short sold (SEBI framework, clause 7)
+        res = one(allow_short=True, allow_margin=True, fno=False)
+        self.assertEqual(verdicts(res), ["BLOCK"])
+        self.assertIn("has no F&O contracts, so it cannot be short sold", reasons(res))
+
+        # an unreadable list is a warning, never a silent pass
+        res = one(allow_short=True, allow_margin=True, fno=None)
+        self.assertIn("eligibility to be short sold is unchecked", warnings(res))
+
+        # intraday only: carried overnight a short becomes a short delivery
+        res = one(order=dict(short, product="CNC"), allow_short=True, allow_margin=True,
+                  allow_delivery=True, product="CNC")
+        self.assertIn("A short has to be intraday (MIS)", reasons(res))
+
+        # an F&O scrip, intraday, margin allowed: the short itself raises no objection
+        res = one(allow_short=True, allow_margin=True)
+        self.assertNotIn("short:", reasons(res))
+
+
+class ShortCash(unittest.TestCase):
+    """A short sale does not hand you the proceeds: the broker blocks margin against it."""
+
+    SHORT = {"symbol": "INFY", "exchange": "NSE", "side": "sell", "qty": "66", "type": "market",
+             "time_in_force": "day", "product": "MIS", "order_class": "bracket",
+             "take_profit_limit_price": "1114.90", "stop_loss_stop_price": "1133.30",
+             "plan": {"entry": 1127.15, "stop": 1133.30, "target": 1114.90, "side": "sell"}}
+
+    def test_a_short_entry_blocks_margin_rather_than_crediting_the_notional(self):
+        pf = {"cash": 301764.85, "positions": []}
+        with mock.patch.object(check, "fno_eligible", return_value=True):
+            res = check.check([dict(self.SHORT)], cfg(allow_short=True, allow_margin=True,
+                                                      mis_margin_pct=20, max_position_pct=100),
+                              portfolio=pf, prices={"INFY": 1127.15}, now=at(NOW))
+        self.assertEqual(verdicts(res), ["PASS"])
+        notional = 66 * 1127.15
+        self.assertAlmostEqual(res["cash_after"], round(301764.85 - notional * 0.20, 2), places=1)
+        self.assertLess(res["cash_after"], pf["cash"])      # never more cash than you started with
 
 
 class Exits(unittest.TestCase):

@@ -95,6 +95,7 @@ Education and tooling, not financial advice.
 import argparse
 import datetime
 import hashlib
+import importlib.util
 import json
 import math
 import os
@@ -120,6 +121,9 @@ TIFS = {"day"}
 PRODUCTS = {"MIS", "CNC"}
 NSE_SYMBOL = re.compile(r"^[A-Z0-9][A-Z0-9&\-]{0,19}$")
 HHMM = re.compile(r"^([01]?\d|2[0-3]):([0-5]\d)$")
+HERE = os.path.dirname(os.path.abspath(__file__))
+SKILLS = os.path.dirname(HERE)   # the folder holding trader-scanner/ (repo or .claude/skills)
+
 CENT = 0.005
 FRESH_MINUTES = 15
 ENTRY_STATUSES = ("approved", "declined", "placed", "denied", "failed")
@@ -289,6 +293,21 @@ def window_check(now_ist, c):
         return ["window: no new entries after %s IST (it is %s)" % (after.strftime("%H:%M"),
                                                                    t.strftime("%H:%M"))], warns
     return [], warns
+
+
+def fno_eligible(symbol, skills=SKILLS):
+    """True / False if the scrip has F&O contracts, or None when NSE's list cannot be read.
+
+    The scanner holds the list, as it holds the holidays. None is not a pass: the caller warns,
+    because only an F&O-segment scrip may be short sold."""
+    path = os.path.join(skills, "trader-scanner", "scan.py")
+    try:
+        spec = importlib.util.spec_from_file_location("risk_scan_fno", path)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        return str(symbol).upper() in mod.fno_symbols()
+    except Exception:
+        return None
 
 
 def square_off_warning(c):
@@ -763,9 +782,28 @@ def check(orders, cfg, portfolio=None, prices=None, state=None, today=None, now=
         if side == "sell" and sym and kind == "entry":
             over = q > held + 1e-9 if q is not None else held <= 0
             if over:
-                reasons.append("short: selling more %s than you hold (%s shares). Short selling is not supported "
-                               "end to end yet, so it is blocked even with \"allow_short\": true. If you bought "
-                               "it, record the fill first (ticket.py fill)" % (sym, _num(held)))
+                # Selling what you do not hold is a short. Every one of these has to hold, or
+                # the position cannot be closed on your terms and becomes a short delivery.
+                if not c.get("allow_short"):
+                    reasons.append("short: selling more %s than you hold (%s shares), which is a short. Set "
+                                   "\"allow_short\": true to allow one, or, if you bought it, record the fill "
+                                   "first (ticket.py fill)" % (sym, _num(held)))
+                else:
+                    eligible = fno_eligible(sym)
+                    if eligible is False:
+                        reasons.append("short: %s has no F&O contracts, so it cannot be short sold. SEBI's "
+                                       "short selling framework (Annexure-1, clause 7) makes only F&O-segment "
+                                       "scrips eligible" % sym)
+                    elif eligible is None:
+                        warns.append("short: could not read NSE's F&O list, so %s's eligibility to be short "
+                                     "sold is unchecked. Only an F&O-segment scrip may be short sold" % sym)
+                    if product != "MIS":
+                        reasons.append("short: %s would be a %s short. A short has to be intraday (MIS): "
+                                       "carried overnight it is a short delivery and goes to auction"
+                                       % (sym, product))
+                    if not c.get("allow_margin"):
+                        reasons.append("short: a short uses the broker's intraday margin, so it needs "
+                                       "\"allow_margin\": true as well as \"allow_short\": true")
 
         # day-trade checks: stop, loss, reward:risk, daily loss, trades, window
         max_loss = risk_ps = rr = stop = target = charges = loss_at_stop = None
@@ -887,8 +925,16 @@ def check(orders, cfg, portfolio=None, prices=None, state=None, today=None, now=
                     acct["shares"][sym] = held + q
             elif side == "sell":
                 if value is not None:
-                    acct["cash"] += value
-                    acct["values"][sym] = max(acct["values"].get(sym, 0.0) - value, 0.0)
+                    if kind == "entry":
+                        # A short sale does not hand you the proceeds to spend: the broker
+                        # blocks margin against the position instead, and the exposure is
+                        # still the full notional.
+                        pct = float(c.get("mis_margin_pct") or 100) if product == "MIS" else 100.0
+                        acct["cash"] -= value * pct / 100.0
+                        acct["values"][sym] = acct["values"].get(sym, 0.0) + value
+                    else:
+                        acct["cash"] += value
+                        acct["values"][sym] = max(acct["values"].get(sym, 0.0) - value, 0.0)
                 if q is not None:
                     acct["shares"][sym] = held - q
         results.append({

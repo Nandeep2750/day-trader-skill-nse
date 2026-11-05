@@ -898,15 +898,24 @@ def usable(bars, day, cutoff, n_range):
     return all(slot(day, k) in have for k in range(need))
 
 
-def orb_candidate(bars, n_range):
-    """Stage 1, closes only: some completed bar after the range closed at or above
-    the highest close of the range. Necessary for a breakout (range high >= any range close)."""
-    top = max(b["c"] for b in bars[:n_range])
+def orb_candidate(bars, n_range, down=False):
+    """Stage 1, closes only: some completed bar after the range closed at or beyond the range's
+    extreme close. Necessary for a break (the range high is >= any range close, and its low <=
+    any of them), so a candidate here can still fail stage 2."""
+    rng = [b["c"] for b in bars[:n_range]]
+    if down:
+        floor = min(rng)
+        return any(b["c"] <= floor for b in bars[n_range:])
+    top = max(rng)
     return any(b["c"] >= top for b in bars[n_range:])
 
 
-def orb_hit(bars, n_range):
-    """Stage 2, real highs and lows: the first completed bar to CLOSE above the range high."""
+def orb_hit(bars, n_range, down=False):
+    """Stage 2, real highs and lows: the first completed bar to CLOSE beyond the range. Above
+    the range high for a breakout, below the range low for a breakdown.
+
+    pct_over is the distance past the broken edge, always a positive number: over the high on
+    a breakout, under the low on a breakdown."""
     rng = bars[:n_range]
     if any(b["h"] is None or b["l"] is None for b in rng):
         return None
@@ -914,12 +923,14 @@ def orb_hit(bars, n_range):
     ol = min(b["l"] for b in rng)
     for k in range(n_range, len(bars)):
         b = bars[k]
-        if b["c"] > oh:
+        if (b["c"] < ol) if down else (b["c"] > oh):
             closes_at = b["start"] + datetime.timedelta(minutes=BAR_MIN)
+            edge = ol if down else oh
+            pct = (1 - b["c"] / edge) if down else (b["c"] / edge - 1)
             return {"price": round(b["c"], 2), "at": clock_label(closes_at),
                     "bar_start": b["start"].strftime("%H:%M"), "bar_index": k,
                     "or_high": round(oh, 2), "or_low": round(ol, 2),
-                    "pct_over": round((b["c"] / oh - 1) * 100, 2), "_t": closes_at}
+                    "pct_over": round(pct * 100, 2), "_t": closes_at}
     return None
 
 
@@ -963,16 +974,24 @@ def orb_window(now_utc, at, or_minutes, until, explicit_day=None):
 
 
 def scan_orb(stage1, symbols, day, cutoff, or_minutes, min_price=0.0, min_volume=0, confirm=None,
-             max_confirm=None):
+             max_confirm=None, down=False, eligible=None):
     """stage1 = {SYM: series} with closes (spark or v8). confirm(sym) -> series with highs/lows
     (None = use the stage-1 series). With confirm and max_confirm, only the max_confirm most
     traded candidates (price x volume so far) are confirmed; the rest are counted as unconfirmed.
+
+    down scans for opening-range breakdowns instead of breakouts. eligible, when given, is the
+    set of symbols allowed through: a breakdown is a short setup, and SEBI's short selling
+    framework (Annexure-1, clause 7) makes only F&O-segment scrips eligible to short, so a
+    breakdown scan passes fno_symbols() here. Skipped symbols are counted as ineligible.
     Returns (hits, counts, failed {sym: why})."""
     n_range = or_minutes // BAR_MIN
     counts = {"requested": len(symbols), "fetched": 0, "unusable": 0, "illiquid": 0, "scanned": 0,
-              "candidates": 0, "confirmed": 0, "unconfirmed": 0}
+              "candidates": 0, "confirmed": 0, "unconfirmed": 0, "ineligible": 0}
     hits, failed, cands = [], {}, []
     for sym in symbols:
+        if eligible is not None and sym not in eligible:
+            counts["ineligible"] += 1
+            continue
         s = stage1.get(sym)
         if not s:
             continue
@@ -988,7 +1007,7 @@ def scan_orb(stage1, symbols, day, cutoff, or_minutes, min_price=0.0, min_volume
             counts["illiquid"] += 1
             continue
         counts["scanned"] += 1
-        if orb_candidate(bars, n_range):
+        if orb_candidate(bars, n_range, down):
             cands.append((sym, bars, bars[-1]["c"] * vol))
     counts["candidates"] = len(cands)
     if confirm is not None and max_confirm and len(cands) > max_confirm:
@@ -1008,9 +1027,13 @@ def scan_orb(stage1, symbols, day, cutoff, or_minutes, min_price=0.0, min_volume
                 failed[sym] = "the v8 chart has a missing bar"
                 continue
         counts["confirmed"] += 1
-        h = orb_hit(full, n_range)
+        h = orb_hit(full, n_range, down)
         if h:
-            hits.append(dict({"symbol": sym, "setups": ["orb"]}, **h))
+            # A breakout stays exactly as it was, side and all: readers take a missing side as
+            # a buy. Only a breakdown carries one, because only it is not the default.
+            head = {"symbol": sym, "setups": ["orb_down"], "side": "sell"} if down else \
+                   {"symbol": sym, "setups": ["orb"]}
+            hits.append(dict(head, **h))
     hits.sort(key=lambda x: (x["_t"], x["symbol"]))
     for h in hits:
         del h["_t"]
@@ -1162,9 +1185,13 @@ def fno_symbols(offline_dir=None):
     BANKNIFTY) come along harmlessly: no equity scrip shares their name."""
     fname, rel = FO_LOTS
     if offline_dir:
-        path = os.path.join(offline_dir, fname)
-        if not os.path.exists(path):
-            raise ScanError("no %s in %s" % (fname, offline_dir))
+        # --offline is either a folder of charts or a single wall file; the NSE lists sit in
+        # that folder or in an nse/ subfolder beside it, as the fixtures do.
+        base = os.path.dirname(offline_dir) if os.path.isfile(offline_dir) else offline_dir
+        tried = [os.path.join(base, fname), os.path.join(base, "nse", fname)]
+        path = next((t for t in tried if os.path.exists(t)), None)
+        if path is None:
+            raise ScanError("no %s next to %s (looked in %s)" % (fname, offline_dir, " and ".join(tried)))
         with open(path, encoding="utf-8", errors="replace") as fh:
             text = fh.read()
     else:
@@ -1512,17 +1539,26 @@ def cmd_orb(a):
             if len(done) % 50 == 0:
                 progress(a, "  stage 2: %d v8 charts so far" % len(done))
             return parse_chart(yahoo_get(chart_path(sym, rng, "%dm" % BAR_MIN)), sym)
+    eligible = None
+    if a.down:
+        # Only an F&O-segment scrip may be short sold (SEBI framework, Annexure-1 clause 7), so
+        # a breakdown scan never reports one that cannot be shorted.
+        eligible = fno_symbols(a.offline)
     hits, counts, failed2 = scan_orb(data, symbols, day, cutoff, a.or_minutes, a.min_price, a.min_volume, confirm,
-                                     a.max_confirm)
+                                     a.max_confirm, a.down, eligible)
     failed = dict(failed or {})
     failed.update(failed2)
     nfailed = len([s for s in symbols if s in failed])
     as_of = "%s %s IST" % (day.isoformat(), cutoff.strftime("%H:%M"))
-    doc = {"created_by": "trader-scanner", "created_at": now.strftime("%Y-%m-%dT%H:%M:%SZ"), "mode": "orb",
+    doc = {"created_by": "trader-scanner", "created_at": now.strftime("%Y-%m-%dT%H:%M:%SZ"),
+           "mode": "orb_down" if a.down else "orb",
            "as_of": as_of, "universe": len(symbols), "scanned": counts["scanned"], "failed": nfailed,
            "unconfirmed": counts["unconfirmed"], "source": "yahoo", "or_minutes": a.or_minutes,
            "interval": "%dm" % BAR_MIN,
            "filters": {"min_price": a.min_price, "min_volume": a.min_volume}, "note": NOTE, "hits": hits}
+    if a.down:
+        doc["side"] = "sell"
+        doc["eligible"], doc["ineligible"] = len(eligible or ()), counts["ineligible"]
     if a.offline:
         doc["offline"] = os.path.basename(a.offline.rstrip("/"))
     if not a.no_write:
@@ -1530,8 +1566,16 @@ def cmd_orb(a):
     if a.json:
         print(json.dumps(dict(doc, counts=counts, seconds=round(time.time() - t0, 1)), indent=2))
         return 0 if hits else 1
-    print("Opening-range breakout scan, %s %s IST: %d-minute range (9:15 to %s), 5-minute bars, Yahoo."
-          % (day_label(day), clock_label(cutoff), a.or_minutes, clock_label(slot(day, a.or_minutes // BAR_MIN))))
+    # "above the high" / "below the low" for the sentence, "over" / "under" for the per-row
+    # percentage: a breakout's wording is left exactly as it was.
+    edge, side_word, beyond = ("low", "below", "under") if a.down else ("high", "above", "over")
+    print("Opening-range %s scan, %s %s IST: %d-minute range (9:15 to %s), 5-minute bars, Yahoo."
+          % ("breakdown" if a.down else "breakout", day_label(day), clock_label(cutoff), a.or_minutes,
+             clock_label(slot(day, a.or_minutes // BAR_MIN))))
+    if a.down:
+        print("Short setup: %s of %s symbols are F&O scrips and so eligible to short sell; %s were skipped."
+              % ("{:,}".format(len(symbols) - counts["ineligible"]), "{:,}".format(len(symbols)),
+                 "{:,}".format(counts["ineligible"])))
     print("Fetched %s of %s charts%s; %s usable%s; %s candidates, %s confirmed with real highs and lows."
           % ("{:,}".format(counts["fetched"]), "{:,}".format(len(symbols)),
              (" (%s failed or had no data)" % "{:,}".format(nfailed)) if nfailed else "",
@@ -1542,18 +1586,18 @@ def cmd_orb(a):
         print("PARTIAL: %s more candidates were not checked (only the %s most traded are; --max-confirm 0 "
               "checks all)." % ("{:,}".format(counts["unconfirmed"]), "{:,}".format(a.max_confirm)))
     if hits:
-        print("%d of %s charts closed above their opening-range high by %s:"
+        print("%d of %s charts closed %s their opening-range %s by %s:"
               % (len(hits), ("the %s checked" % "{:,}".format(counts["confirmed"])) if counts["unconfirmed"]
-                 else "{:,}".format(counts["scanned"]), clock_label(cutoff)))
+                 else "{:,}".format(counts["scanned"]), side_word, edge, clock_label(cutoff)))
         for h in hits[:a.show]:
-            print("  %8s  %-10s %12s  range %s to %s  %+.2f%% over" % (
-                h["at"], h["symbol"], inr(h["price"]), _p(h["or_low"]), _p(h["or_high"]), h["pct_over"]))
+            print("  %8s  %-10s %12s  range %s to %s  %+.2f%% %s" % (
+                h["at"], h["symbol"], inr(h["price"]), _p(h["or_low"]), _p(h["or_high"]), h["pct_over"], beyond))
         if len(hits) > a.show:
             print("  ... and %d more in the watchlist (--show N for more)." % (len(hits) - a.show))
     else:
-        print("No chart closed above its opening-range high by %s." % clock_label(cutoff))
+        print("No chart closed %s its opening-range %s by %s." % (side_word, edge, clock_label(cutoff)))
     if not a.no_write:
-        print("Wrote %s (mode orb, %d hit%s)." % (a.out, len(hits), "" if len(hits) == 1 else "s"))
+        print("Wrote %s (mode %s, %d hit%s)." % (a.out, doc["mode"], len(hits), "" if len(hits) == 1 else "s"))
     print(NOTE + " Next: pick one chart, then /trader-news SYMBOL and /trader-entry SYMBOL.")
     return 0 if hits else 1
 
@@ -1613,6 +1657,8 @@ def main(argv=None):
     p.add_argument("--at", help="cut the clock at this IST time, HH:MM")
     p.add_argument("--until", help="no new entries after HH:MM IST (default: config no_entries_after, 14:45)")
     p.add_argument("--config", default="trader/config.json")
+    p.add_argument("--down", action="store_true",
+                   help="opening-range breakdowns (a short setup) instead of breakouts; F&O scrips only")
     p = sub.add_parser("volatile", help="the most volatile liquid stocks (ATR%%), for tomorrow's watchlist")
     common(p, 50.0, None, show=None)
     p.add_argument("--index", choices=sorted(NSE_LISTS),

@@ -37,6 +37,7 @@ python3 "${CLAUDE_SKILL_DIR}/scan.py" daily                             # before
 python3 "${CLAUDE_SKILL_DIR}/scan.py" daily --symbols RELIANCE,INFY,M&M # or --watchlist FILE, --limit 200
 python3 "${CLAUDE_SKILL_DIR}/scan.py" orb                               # after 9:35 AM IST -> trader/watchlist.json
 python3 "${CLAUDE_SKILL_DIR}/scan.py" orb --at 09:45                    # cut the clock at 9:45 AM IST
+python3 "${CLAUDE_SKILL_DIR}/scan.py" orb --down                        # breakdowns: the short side, F&O scrips only
 python3 "${CLAUDE_SKILL_DIR}/scan.py" orb --watchlist trader/watchlist.json --json
 python3 "${CLAUDE_SKILL_DIR}/scan.py" volatile --index nifty500         # after the close: most volatile liquid stocks
 python3 "${CLAUDE_SKILL_DIR}/scan.py" volatile --symbols CARTRADE,AEGISLOG --top 5

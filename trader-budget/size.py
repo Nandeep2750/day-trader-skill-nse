@@ -455,8 +455,13 @@ def size_trade(plan, cfg, budget=None, limit=None, price=None, cash=None, today=
     if not NSE_SYMBOL.match(sym):
         raise SizeError("%r does not look like an NSE symbol (like RELIANCE, M&M or BAJAJ-AUTO)" % sym)
     side = str(plan.get("side") or "buy").strip().lower()
-    if side != "buy":
-        raise SizeError("this pack sizes long (buy) day trades only; the plan says %r" % side)
+    if side in ("long",):
+        side = "buy"
+    if side in ("short",):
+        side = "sell"
+    if side not in ("buy", "sell"):
+        raise SizeError("the plan's side is buy or sell, not %r" % plan.get("side"))
+    long = side == "buy"
     if today and plan.get("date") and str(plan["date"]) != today:
         raise SizeError("the plan is for %s and today is %s in India: make a new plan with trader-exit"
                         % (plan["date"], today))
@@ -488,19 +493,23 @@ def size_trade(plan, cfg, budget=None, limit=None, price=None, cash=None, today=
         ref, ref_from = round_paise(price), "price"
     else:
         ref, ref_from = round_paise(entry_plan), "plan"
-    stop, target = to_tick(stop_plan, "up"), to_tick(target_plan, "down")
+    # Toward the entry for the stop, away for the target, so neither the risk nor the promise grows.
+    stop_dir, target_dir = ("up", "down") if long else ("down", "up")
+    stop, target = to_tick(stop_plan, stop_dir), to_tick(target_plan, target_dir)
     if abs(stop - round_paise(stop_plan)) > EPS:
-        rounding.append("stop %s -> %s (up to the tick)" % (_price(stop_plan), _price(stop)))
+        rounding.append("stop %s -> %s (%s to the tick)" % (_price(stop_plan), _price(stop), stop_dir))
     if abs(target - round_paise(target_plan)) > EPS:
-        rounding.append("target %s -> %s (down to the tick)" % (_price(target_plan), _price(target)))
-    if stop >= ref:
-        raise SizeError("the stop %s is not below the entry %s; a long trade needs its stop underneath"
-                        % (_price(stop), _price(ref)))
-    if target <= ref:
-        raise SizeError("the target %s is not above the entry %s: the move has already happened. "
-                        "Skip it or make a new plan with trader-exit" % (_price(target), _price(ref)))
-    risk_c = paise(ref) - paise(stop)
-    reward_c = paise(target) - paise(ref)
+        rounding.append("target %s -> %s (%s to the tick)" % (_price(target_plan), _price(target), target_dir))
+    if (stop >= ref) if long else (stop <= ref):
+        raise SizeError("the stop %s is not %s the entry %s; a %s trade needs its stop %s"
+                        % (_price(stop), "below" if long else "above", _price(ref),
+                           "long" if long else "short", "underneath" if long else "above it"))
+    if (target <= ref) if long else (target >= ref):
+        raise SizeError("the target %s is not %s the entry %s: the move has already happened. "
+                        "Skip it or make a new plan with trader-exit"
+                        % (_price(target), "above" if long else "below", _price(ref)))
+    risk_c = (paise(ref) - paise(stop)) if long else (paise(stop) - paise(ref))
+    reward_c = (paise(target) - paise(ref)) if long else (paise(ref) - paise(target))
     risk = risk_c / 100.0
     with_charges = bool(c.get("include_charges", True))
     broker, _ = charge_rates(c)
@@ -516,11 +525,27 @@ def size_trade(plan, cfg, budget=None, limit=None, price=None, cash=None, today=
     margin_pct = float(c.get("mis_margin_pct") or 100)
     if margin and not 0 < margin_pct <= 100:
         raise SizeError("mis_margin_pct must be above 0 and at most 100")
+    if not long:
+        # There is nothing to buy with cash when you sell first: a short is the broker's
+        # intraday margin by nature, and it has to be squared off the same session or it
+        # becomes a short delivery and goes to auction.
+        if product != "MIS":
+            raise SizeError("a short has to be intraday: set \"product\": \"MIS\", not %r. A short carried "
+                            "overnight is a short delivery and goes to auction" % product)
+        if not margin:
+            raise SizeError("a short uses the broker's intraday margin, so it needs \"allow_margin\": true "
+                            "in trader/config.json. At %s%% margin your budget carries %s times the notional, "
+                            "so set max_position_pct and max_loss_per_trade_inr before you turn it on"
+                            % (_num(margin_pct), _num(round(100.0 / margin_pct, 1))))
 
     def loss_for(q):
-        """(price loss, charges, all-in loss) at the stop for q shares, in rupees."""
+        """(price loss, charges, all-in loss) at the stop for q shares, in rupees.
+
+        round_trip_charges takes the buy leg and the sell leg by value, whichever comes first:
+        a long buys at the entry and sells at the stop, a short the other way about."""
         price_loss = q * risk_c / 100.0
-        ch = round_trip_charges(c, q * ref, q * stop)["total"] if (with_charges and q > 0) else 0.0
+        legs = (q * ref, q * stop) if long else (q * stop, q * ref)
+        ch = round_trip_charges(c, *legs)["total"] if (with_charges and q > 0) else 0.0
         return round(price_loss, 2), ch, round(price_loss + ch, 2)
 
     limits = []
@@ -560,9 +585,11 @@ def size_trade(plan, cfg, budget=None, limit=None, price=None, cash=None, today=
     refusal = None
     if qty == 0:
         if bound[0] == "max loss":
-            refusal = ("one share risks %s (entry %s minus stop %s)%s, more than your %s max loss per trade. "
+            hi, lo = (ref, stop) if long else (stop, ref)
+            refusal = ("one share risks %s (%s %s minus %s %s)%s, more than your %s max loss per trade. "
                        "No order. Skip this trade, or plan a closer stop with trader-exit."
-                       % (inr(risk), _price(ref), _price(stop),
+                       % (inr(risk), "entry" if long else "stop", _price(hi),
+                          "stop" if long else "entry", _price(lo),
                           " plus charges" if with_charges else "", inr(max_loss)))
         else:
             refusal = ("one share of %s costs %s, more than your %s limit (%s). No order."
@@ -575,7 +602,7 @@ def size_trade(plan, cfg, budget=None, limit=None, price=None, cash=None, today=
         refusal = ("%d share%s of %s is %s, under your %s minimum order. No order."
                    % (qty, "" if qty == 1 else "s", sym, inr(cost), inr(c["min_order_inr"])))
     return {
-        "symbol": sym, "exchange": "NSE", "side": "buy", "setup": plan.get("setup", ""), "date": plan.get("date"),
+        "symbol": sym, "exchange": "NSE", "side": side, "setup": plan.get("setup", ""), "date": plan.get("date"),
         "entry_time": plan.get("entry_time", ""), "plan_created_at": plan.get("created_at"),
         "entry_plan": round_paise(entry_plan),
         "entry": ref, "entry_from": ref_from, "stop": stop, "target": target,
@@ -595,7 +622,7 @@ def bracket_order(s):
     """The one proposed order (the pack's NSE order shape) plus why and plan."""
     if s["refusal"] or s["qty"] <= 0:
         return None
-    o = {"symbol": s["symbol"], "exchange": "NSE", "side": "buy", "qty": str(int(s["qty"])),
+    o = {"symbol": s["symbol"], "exchange": "NSE", "side": s.get("side") or "buy", "qty": str(int(s["qty"])),
          "type": s["order_type"], "time_in_force": "day", "product": s["product"]}
     if s["order_type"] == "limit":
         o["limit_price"] = _price(s["entry"])
@@ -626,8 +653,10 @@ def bracket_order(s):
 def plan_report(s, order, notes=()):
     lines = []
     setup = SETUP_WORDS.get(s["setup"], s["setup"] or "setup")
-    lines.append("%s (NSE) buy, %s, entry %s%s" % (s["symbol"], setup, _price(s["entry_plan"]),
-                                                  (" at " + s["entry_time"]) if s["entry_time"] else ""))
+    side = s.get("side") or "buy"
+    long = side == "buy"
+    lines.append("%s (NSE) %s, %s, entry %s%s" % (s["symbol"], side, setup, _price(s["entry_plan"]),
+                                                 (" at " + s["entry_time"]) if s["entry_time"] else ""))
     lines.append("Stop %s%s. Target %s%s." % (_price(s["stop"]), (": " + s["stop_label"]) if s["stop_label"] else "",
                                              _price(s["target"]),
                                              (": " + s["target_label"]) if s["target_label"] else ""))
@@ -637,9 +666,11 @@ def plan_report(s, order, notes=()):
         lines.append(n)
     src = {"plan": "the plan's entry", "price": "the latest price, above the plan's entry",
            "limit": "your limit price"}[s["entry_from"]]
-    lines.append("Sized at %s (%s). Risk %s a share (entry %s minus stop %s). Reward:risk %.2f."
-                 % (_price(s["entry"]), src, _price(s["risk_per_share"]), _price(s["entry"]), _price(s["stop"]),
-                    s["reward_risk"]))
+    first, second = (s["entry"], s["stop"]) if long else (s["stop"], s["entry"])
+    lines.append("Sized at %s (%s). Risk %s a share (%s %s minus %s %s). Reward:risk %.2f."
+                 % (_price(s["entry"]), src, _price(s["risk_per_share"]),
+                    "entry" if long else "stop", _price(first),
+                    "stop" if long else "entry", _price(second), s["reward_risk"]))
     lines.append("")
     lines.append("Limits (whole shares; the smallest one wins):")
     for l in s["limits"]:
@@ -661,14 +692,14 @@ def plan_report(s, order, notes=()):
         lines.append("Estimated charges (%s, round trip): %s. All in: %s."
                      % ({"zerodha": "Zerodha", "angelone": "Angel One"}.get(s["broker"], s["broker"]),
                         inr(s["charges"]), inr(s["max_loss"])))
-    lines.append("A stop is an order, not a promise: in a fast market or a circuit it can fill below %s."
-                 % _price(s["stop"]))
+    lines.append("A stop is an order, not a promise: in a fast market or a circuit it can fill %s %s."
+                 % ("below" if long else "above", _price(s["stop"])))
     lines.append("")
     lines.append("Proposed bracket order (nothing has been placed):")
     how = "limit %s" % order["limit_price"] if order["type"] == "limit" else "market"
-    lines.append("  buy %s %s on NSE, %s, %s, day; then a stop-loss (SL-M) at %s; target %s watched by trader-alerts"
-                 % (order["qty"], order["symbol"], how, order["product"], order["stop_loss_stop_price"],
-                    order["take_profit_limit_price"]))
+    lines.append("  %s %s %s on NSE, %s, %s, day; then a stop-loss (SL-M) at %s; target %s watched by trader-alerts"
+                 % (order["side"], order["qty"], order["symbol"], how, order["product"],
+                    order["stop_loss_stop_price"], order["take_profit_limit_price"]))
     if s["flat_by"]:
         lines.append("Flat by %s IST: anything still open then gets closed (trader-alerts rings, "
                      "trader-broker flatten), before your broker's auto square-off." % s["flat_by"])

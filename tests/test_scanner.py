@@ -1196,3 +1196,61 @@ class ClosingAuctionSession(unittest.TestCase):
     def test_a_file_whose_shape_changed_raises(self):
         with self.assertRaises(scan.ScanError):
             scan.fno_symbols_from("UNDERLYING,SYMBOL\n")
+
+
+class OpeningRangeBreakdown(unittest.TestCase):
+    """orb --down: the mirror of a breakout, and a short setup, so F&O scrips only."""
+
+    def bars(self, closes, n=3):
+        """closes -> 5-minute bars whose highs and lows bracket each close."""
+        out = []
+        for i, c in enumerate(closes):
+            out.append({"start": DT(2026, 10, 29, 9, 15) + datetime.timedelta(minutes=5 * i),
+                        "c": c, "h": c + 1, "l": c - 1, "v": 1000})
+        return out, n
+
+    def test_a_breakdown_is_the_first_close_under_the_range_low(self):
+        bars, n = self.bars([100, 101, 99, 99.5, 97.0])     # range low 99, its low 98
+        hit = scan.orb_hit(bars, n, down=True)
+        self.assertEqual((hit["price"], hit["or_low"], hit["bar_index"]), (97.0, 98.0, 4))
+        self.assertGreater(hit["pct_over"], 0)              # distance past the edge, always positive
+        self.assertIsNone(scan.orb_hit(bars, n))            # nothing closed above the range high
+
+    def test_a_close_inside_the_range_is_not_a_breakdown(self):
+        bars, n = self.bars([100, 101, 99, 99.5, 99.2])
+        self.assertIsNone(scan.orb_hit(bars, n, down=True))
+        self.assertFalse(scan.orb_candidate(bars, n, down=True))
+
+    def test_candidate_is_necessary_but_not_sufficient(self):
+        # closes at the range's lowest close, so stage 1 passes; it never gets under the real low
+        bars, n = self.bars([100, 101, 99, 99.0, 99.0])
+        self.assertTrue(scan.orb_candidate(bars, n, down=True))
+        self.assertIsNone(scan.orb_hit(bars, n, down=True))
+
+    def test_a_breakdown_hit_says_it_is_a_sell(self):
+        wall = scan.load_offline(WALL)[0]
+        syms = sorted(wall)
+        eligible = scan.fno_symbols(NSE)
+        hits, counts, _ = scan.scan_orb(wall, syms, D(2026, 10, 29), DT(2026, 10, 29, 14, 30), 15,
+                                        min_price=0, down=True, eligible=eligible)
+        self.assertEqual([h["symbol"] for h in hits], ["INFY", "TCS", "M&M"])
+        for h in hits:
+            self.assertEqual((h["side"], h["setups"]), ("sell", ["orb_down"]))
+            self.assertLess(h["price"], h["or_low"])
+        self.assertEqual(counts["ineligible"], len([s for s in syms if s not in eligible]))
+
+    def test_a_breakout_hit_still_carries_no_side(self):
+        wall = scan.load_offline(WALL)[0]
+        hits, _, _ = scan.scan_orb(wall, sorted(wall), D(2026, 10, 29), DT(2026, 10, 29, 14, 30), 15, min_price=0)
+        self.assertTrue(hits)
+        for h in hits:
+            self.assertNotIn("side", h)      # readers take a missing side as a buy
+            self.assertEqual(h["setups"], ["orb"])
+
+    def test_an_ineligible_scrip_is_never_reported(self):
+        wall = scan.load_offline(WALL)[0]
+        hits, counts, _ = scan.scan_orb(wall, sorted(wall), D(2026, 10, 29), DT(2026, 10, 29, 14, 30), 15,
+                                        min_price=0, down=True, eligible=frozenset())
+        self.assertEqual(hits, [])
+        self.assertEqual(counts["ineligible"], len(wall))
+        self.assertEqual(counts["scanned"], 0)

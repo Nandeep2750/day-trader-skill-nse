@@ -65,7 +65,7 @@ batch that is fine order by order but breaks a limit together is caught.
 | --- | --- |
 | format | no symbol; side not buy or sell; no whole-share `qty` (NSE has no fractional shares, and a rupee `notional` is refused); type not market or limit; a limit order with no limit price; `time_in_force` not day; `exchange` not NSE; `product` not MIS or CNC; a price off NSE's tick (near a band edge, off the coarser tick); a bracket that misses its stop-loss or target. Case never matters: "LIMIT" is checked as "limit" |
 | asset | anything but a plain NSE symbol (RELIANCE, M&M, BAJAJ-AUTO): a `.BO` (BSE) or `.NS` (Yahoo) suffix, or a symbol that does not look like NSE's |
-| short | a sell of more than you hold. Short selling is not supported end to end yet (trader-broker cannot protect a short), so this blocks even with `allow_short` true |
+| short | a sell of more than you hold. Allowed only with `allow_short` AND `allow_margin` true, `product` MIS, and a scrip that has F&O contracts: SEBI's framework (Annexure-1, clause 7) makes only F&O-segment scrips eligible to short sell. A short carried overnight is a short delivery and goes to auction |
 | blocked | (entries) the symbol is on the `blocked` list |
 | product | (entries) CNC (delivery) while `allow_delivery` is false: entries are MIS (intraday) |
 | size | (entries) under `min_order_inr` or over `max_order_inr` |

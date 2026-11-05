@@ -49,6 +49,11 @@ Other flags: `--flat-by 15:10`, `--json`, `--now "2026-10-29 09:41"` (IST),
 | --- | --- |
 | `trader/entry.json` | the trigger from trader-entry: symbol, entry price, time, bar, opening range |
 | `trader/config.json` | `flat_by` (15:00), `min_reward_risk` (1.0: a note here, trader-risk enforces it) and `broker` (`zerodha` or `angelone`, for the square-off warning) |
+
+`--side sell` plans a short: the stop goes above the entry and rounds DOWN
+toward it, the target goes below and rounds UP, and the risk is stop minus
+entry. A plan is geometry, not permission: trader-risk is what checks the
+scrip may be short sold at all.
 | Yahoo chart API | only for an `atr:K` stop: the session's bars for `SYMBOL.NS` up to the entry bar, free and unofficial |
 | `trader/plan.json` | with `--write`: symbol, exchange (NSE), entry, stop and its rule, target and its R, risk a share, reward:risk, flat by. trader-timemachine, trader-budget and trader-alerts read it |
 

@@ -65,6 +65,12 @@ amount is in rupees.
   **min_reward_risk** (1.0), **require_stop** (true), **no_entries_before** / **no_entries_after**
   ("09:30" / "14:45") and **flat_by** ("15:10"), all IST. Keep flat_by before the broker's MIS auto
   square-off (Zerodha 15:25, Angel One 15:10).
+
+A short (`"side": "sell"` in the plan) is sized on the broker's intraday
+margin, so it needs `"allow_margin": true` and `"product": "MIS"`. At 20%
+margin a budget carries five times the notional, so set `max_position_pct`
+and `max_loss_per_trade_inr` before turning it on. STT lands on the entry
+leg instead of the exit.
 - **broker**: "zerodha" or "angelone" (sets the brokerage in the charges estimate and where
   trader-broker sends orders). **product**: "MIS" (intraday, the default) or "CNC" (delivery).
 - **include_charges** (true): count the estimated round-trip charges inside the max loss.
