@@ -50,6 +50,7 @@ python3 "${CLAUDE_SKILL_DIR}/ticket.py" fill --symbol RELIANCE --side sell --qty
 python3 "${CLAUDE_SKILL_DIR}/ticket.py" fill --symbol RELIANCE --side sell --qty 20 --price 1240.40 --target-hit
 python3 "${CLAUDE_SKILL_DIR}/ticket.py" cancelled --symbol RELIANCE --broker-id ID   # the other leg, cancelled
 python3 "${CLAUDE_SKILL_DIR}/ticket.py" flatten --symbol RELIANCE --qty 20
+python3 "${CLAUDE_SKILL_DIR}/ticket.py" flatten --symbol INFY            # a short: a BUY to cover
 python3 "${CLAUDE_SKILL_DIR}/ticket.py" log
 ```
 
@@ -59,6 +60,21 @@ flatten tickets, and keeps the log in `trader/state/broker.json`.
 `--now "2026-11-02 09:45"` pins the clock (IST). Symbols are plain NSE
 symbols (RELIANCE, M&M, BAJAJ-AUTO); a `.NS` suffix is stripped, `.BO` is refused.
 
+## A short position
+
+A short sale is recorded as negative shares, and its proceeds are NOT cash to
+spend: the broker blocks intraday margin against the position instead
+(`mis_margin_pct` of the sale value, 100% when the config gives no figure), so
+`fill --side sell` on a scrip that is not held takes the margin out of cash and
+`fill --side buy` puts it back with whatever the round trip made or lost.
+Recording a short needs `"allow_short": true` in `trader/config.json`; without
+it the fill is refused. An order that would cross from long to short, or from
+short to long, in one go is refused: close the position you are in first.
+
+A short's protective stop is an SL-M **BUY** above the entry (the tools already
+derive it from the entry's side), and the ticket must be covered the same day:
+a short carried overnight is a short delivery and goes to auction.
+
 ## What it reads and writes
 
 | file | what |
@@ -67,7 +83,7 @@ symbols (RELIANCE, M&M, BAJAJ-AUTO); a `.NS` suffix is stripped, `.BO` is refuse
 | `trader/config.json` | `broker` ("zerodha" or "angelone"), `paper`, `product` ("MIS"), `flat_by`, `budget` |
 | `trader/state/risk.json` | trader-risk's verdicts; only a PASS from today is READY |
 | `trader/state/broker.json` | every yes, no, placed, failed, filled and stop, with each entry's max loss |
-| `trader/portfolio.json` | cash and shares, updated by `fill` and by `result --filled-qty` |
+| `trader/portfolio.json` | cash and shares, updated by `fill` and by `result --filled-qty`. A short holds NEGATIVE shares, and its lots carry `proceeds` and `blocked` instead of `cost` |
 | `trader/plan.json` | the flat-by time for `flatten` |
 
 ## How a bracket works on NSE
@@ -307,9 +323,13 @@ put an order tool in `allow`.
   prints the cancel for the other leg: make that call at once, then
   `ticket.py cancelled --symbol RELIANCE --broker-id ID`. A Robo bracket
   cancels its own other leg; confirm in `get_orders`.
-- At the target, or by `flat_by` (15:00 IST), anything still open gets closed:
+- At the target, or by `flat_by` (15:00 IST), anything still open gets closed.
+  A long is closed by a SELL, a short by a BUY to cover; `flatten` takes the
+  direction from the position's sign in `trader/portfolio.json` (`--side buy`
+  or `--side sell` overrides it, which is what `--qty` from `get_positions`
+  needs, since a qty alone carries no sign):
   1. Ask the broker what is held: `get_positions` (read only). If the stop
-     already filled, there is nothing to sell.
+     already filled, there is nothing to close.
   2. `ticket.py flatten --symbol RELIANCE --qty 20` writes the flatten
      ticket: cancel EVERY recorded open stop, resting target and Robo bracket
      for the symbol, one call each (Kite `cancel_order` {variety "regular",
@@ -329,8 +349,9 @@ put an order tool in `allow`.
      stop back (the held qty, the cancelled stop's trigger). Re-flatten at once,
      or place that stop and record it: `ticket.py result --index N --restop-id ID`.
      In paper mode the stop is put back as a simulated one.
-  3. `/trader-risk`. A sell that only closes what the user holds is never
-     blocked by the daily limits or the entry window.
+  3. `/trader-risk`. A sell that only closes what the user holds, or a buy that
+     only covers a short they are already in, is never blocked by the daily
+     limits or the entry window.
   4. `ticket.py show`, then the user's yes for that one ticket, the calls in
      order (cancel first), then `result`.
 

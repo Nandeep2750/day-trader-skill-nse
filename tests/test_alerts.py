@@ -595,5 +595,74 @@ class Cli(unittest.TestCase):
         self.assertIn("no rules", err)
 
 
+class ShortRules(unittest.TestCase):
+    """A short's stop is ABOVE the entry and its target BELOW, so both rules watch the
+    other side of the price from a long's."""
+
+    def setUp(self):
+        self.q, _ = alerts.get_quotes(["INFY"], QDIR)          # INFY is 1148.10 in the fixture
+        self.now = ist("2026-11-03 10:00")
+        self.open = alerts.market_status(self.now)
+        self.plan = {"symbol": "INFY", "side": "sell", "entry": 1140.0, "stop": 1147.0,
+                     "target": 1126.0, "flat_by": "15:00", "date": "2026-11-03"}
+
+    def test_the_plan_carries_the_side_into_every_rule(self):
+        rules = alerts.rules_from_plan(self.plan, {"broker": "angelone"})
+        self.assertEqual([r.get("side") for r in rules], ["sell"] * 4)
+        self.assertEqual([alerts.rule_direction(r) for r in rules[:2]], ["above", "below"])
+        long_rules = alerts.rules_from_plan(dict(self.plan, side="buy"))
+        self.assertEqual([r.get("side") for r in long_rules], [None] * 4)
+        self.assertEqual([alerts.rule_direction(r) for r in long_rules[:2]], ["below", "above"])
+
+    def test_a_short_stop_rings_on_the_way_up(self):
+        rules = alerts.rules_from_plan(self.plan, {"broker": "angelone"})
+        rings, _ = alerts.evaluate(rules, self.q, self.open, {}, self.now, held={"INFY"})
+        ids = [r["id"] for r in rings]
+        self.assertIn("infy-plan-stop", ids)
+        self.assertNotIn("infy-plan-target", ids)
+        msg = [r for r in rings if r["id"] == "infy-plan-stop"][0]["message"]
+        self.assertIn("at or above your stop %s1,147.00" % RS, msg)
+        self.assertIn("SL-M buy order at the broker", msg)
+
+    def test_a_short_target_rings_on_the_way_down(self):
+        rules = alerts.rules_from_plan(dict(self.plan, stop=1160.0, target=1150.0),
+                                       {"broker": "angelone"})
+        rings, _ = alerts.evaluate(rules, self.q, self.open, {}, self.now, held={"INFY"})
+        ids = [r["id"] for r in rings]
+        self.assertEqual(ids, ["infy-plan-target"])
+        self.assertIn("at or below your target %s1,150.00" % RS, rings[0]["message"])
+        self.assertIn("then buys back", rings[0]["message"])
+
+    def test_the_same_level_rings_the_opposite_rule_on_a_long(self):
+        short = alerts.rules_from_plan(self.plan, {"broker": "angelone"})[:1]
+        long = alerts.rules_from_plan(dict(self.plan, side="buy"), {"broker": "angelone"})[:1]
+        self.assertEqual([r["id"] for r in alerts.evaluate(short, self.q, self.open, {}, self.now)[0]],
+                         ["infy-plan-stop"])
+        self.assertEqual(alerts.evaluate(long, self.q, self.open, {}, self.now)[0], [])
+
+    def test_the_flat_by_and_square_off_hints_say_buy_back(self):
+        rules = alerts.rules_from_plan(self.plan, {"broker": "angelone"})[2:]
+        late = ist("2026-11-03 15:06")
+        rings, _ = alerts.evaluate(rules, self.q, alerts.market_status(late), {}, late, held={"INFY"})
+        self.assertEqual(len(rings), 2)
+        for r in rings:
+            self.assertIn("cancel the stop, then buy back", r["message"])
+
+    def test_add_side_on_a_manual_stop(self):
+        d = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, d, True)
+        rules = os.path.join(d, "alerts.json")
+        code, _, err = run(["add", "--rules", rules, "--state", os.path.join(d, "state.json"),
+                            "--symbol", "INFY", "--stop", "1147", "--side", "sell"])
+        self.assertEqual(code, 0, err)
+        saved = json.load(io.open(rules, encoding="utf-8"))["rules"][0]
+        self.assertEqual(saved["side"], "sell")
+        self.assertEqual(alerts.rule_direction(saved), "above")
+
+    def test_an_unknown_side_is_refused(self):
+        with self.assertRaises(alerts.AlertError):
+            alerts.validate({"id": "x", "symbol": "INFY", "type": "stop", "price": 1, "side": "up"})
+
+
 if __name__ == "__main__":
     unittest.main()

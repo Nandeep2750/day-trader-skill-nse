@@ -20,15 +20,19 @@ Symbols are plain NSE symbols (RELIANCE, M&M, BAJAJ-AUTO). A trailing ".NS"
 is dropped; ".BO" (BSE) is refused: this pack trades NSE only.
 
 Rule types:
-  above / target  the price is at or above "price"
-  below / stop    the price is at or below "price"
+  above           the price is at or above "price"
+  below           the price is at or below "price"
+  stop / target   the plan's levels. Which way they watch depends on the
+                  trade: on a long (the default) the stop is below the entry
+                  and the target above it; on a short ("side": "sell") it is
+                  the other way round, so the stop rings on the way UP
   pct_move        the price moved "pct" percent or more from the previous close
                   (or from "ref" if you give one); "direction": "up" or "down"
   opening_bell    NSE opened today (rings once per trading day, from 9:15 IST)
   time            the IST clock passed "at" (HH:MM) on a trading day
                   (rings once per trading day)
   square_off      5 minutes before the broker's auto square-off of intraday
-                  (MIS) positions: Zerodha 15:20 (rings 15:15), Angel One
+                  (MIS) positions: Zerodha 15:25 (rings 15:20), Angel One
                   15:10 (rings 15:05). Rings only if trader/portfolio.json
                   still holds the symbol (or there is no portfolio file)
 
@@ -459,6 +463,9 @@ def validate(rule):
         nse_symbol(rule["symbol"])
     if t in ("above", "below", "stop", "target") and not isinstance(rule.get("price"), (int, float)):
         raise AlertError("rule %s needs a numeric price" % rule.get("id"))
+    if rule.get("side") is not None and str(rule["side"]).strip().lower() not in \
+            ("buy", "long", "sell", "short"):
+        raise AlertError("rule %s: side is buy or sell, not %r" % (rule.get("id"), rule["side"]))
     if t == "pct_move" and not isinstance(rule.get("pct"), (int, float)):
         raise AlertError("rule %s needs a numeric pct" % rule.get("id"))
     if t == "time" and _hhmm(rule.get("at")) is None:
@@ -485,9 +492,26 @@ def _rang_today(stamp, today):
     return to_ist(utc).date().isoformat() == today
 
 
-def flatten_hint(sym):
-    return ("trader-broker flatten --symbol %s builds the ticket (cancel the stop, then sell), "
-            "then trader-risk and your yes." % sym)
+def is_short(rule):
+    """A rule on a short position: its stop is ABOVE the entry and its target BELOW."""
+    return str((rule or {}).get("side") or "buy").strip().lower() in ("sell", "short")
+
+
+def rule_direction(rule):
+    """The side of the price a rule watches. A stop is below the entry on a long and above it on a
+    short; a target is the other way round. Any other type is its own direction."""
+    t = (rule or {}).get("type")
+    if t not in ("stop", "target"):
+        return t
+    if t == "stop":
+        return "above" if is_short(rule) else "below"
+    return "below" if is_short(rule) else "above"
+
+
+def flatten_hint(sym, short=False):
+    leg = "buy back" if short else "sell"
+    return ("trader-broker flatten --symbol %s builds the ticket (cancel the stop, then %s), "
+            "then trader-risk and your yes." % (sym, leg))
 
 
 def evaluate(rules, quotes, status, state, now_utc, held=None):
@@ -505,7 +529,8 @@ def evaluate(rules, quotes, status, state, now_utc, held=None):
         rid = r.get("id") or "%s-%s" % (r.get("symbol", "market"), r["type"])
         if not active(r, today):
             continue
-        typ = {"stop": "below", "target": "above"}.get(r["type"], r["type"])
+        typ = rule_direction(r)
+        short = is_short(r)
         if typ == "opening_bell":
             if status["open"] and not _rang_today(rung.get(rid), today):
                 rings.append({"id": rid, "symbol": "", "message": "Opening bell: NSE is open (%s IST), "
@@ -522,7 +547,7 @@ def evaluate(rules, quotes, status, state, now_utc, held=None):
                     ", the market has closed."
                 sym = str(r.get("symbol") or "").upper()
                 if sym:
-                    msg += " If %s is still open, close it: %s" % (sym, flatten_hint(sym))
+                    msg += " If %s is still open, close it: %s" % (sym, flatten_hint(sym, short))
                 rings.append({"id": rid, "symbol": sym, "message": msg})
                 rung[rid] = stamp
             continue
@@ -537,7 +562,8 @@ def evaluate(rules, quotes, status, state, now_utc, held=None):
             msg = ("Square-off in %s: %s auto squares off intraday (MIS) positions at %s IST and charges for it. "
                    "%s %s: %s" % ("5 minutes" if local.time() < sq else "0 minutes, it is %s IST" % local.strftime("%H:%M"),
                                   name, sq.strftime("%H:%M"), sym,
-                                  "is still open" if held is not None else "may still be open", flatten_hint(sym)))
+                                  "is still open" if held is not None else "may still be open",
+                                  flatten_hint(sym, short)))
             rings.append({"id": rid, "symbol": sym, "message": msg})
             rung[rid] = stamp
             continue
@@ -558,11 +584,11 @@ def evaluate(rules, quotes, status, state, now_utc, held=None):
                     msg += (" If the target rests at the broker (a Robo bracket or a resting LIMIT), check "
                             "get_orders: filled, record it (trader-broker fill --target-hit, which prints the "
                             "cancel for the stop). If it is only watched, run /trader-broker flatten (cancels "
-                            "the stop, then sells).")
+                            "the stop, then %s)." % ("buys back" if short else "sells"))
                 elif r["type"] == "stop":
-                    msg += (" The stop is an SL-M order at the broker: check your positions "
+                    msg += (" The stop is an SL-M %sorder at the broker: check your positions "
                             "and record the fill (trader-broker fill --stop-hit, which prints the cancel for a "
-                            "resting target).")
+                            "resting target)." % ("buy " if short else ""))
                 rings.append({"id": rid, "symbol": sym, "message": msg})
                 rung[rid] = stamp
             elif not hit and rid in rung and r.get("rearm"):
@@ -595,6 +621,7 @@ def rules_from_plan(plan, cfg=None):
     cfg = cfg if isinstance(cfg, dict) else {}
     sym = nse_symbol(plan["symbol"])
     low = sym.lower()
+    short = is_short(plan)
     out = []
     for key, typ, word in (("stop", "stop", "plan stop"), ("target", "target", "plan target")):
         v = plan.get(key)
@@ -603,12 +630,17 @@ def rules_from_plan(plan, cfg=None):
         label = plan.get("%s_label" % key)
         out.append({"id": "%s-plan-%s" % (low, key), "symbol": sym, "type": typ, "price": float(v),
                     "note": word + (": " + label if label else "")})
+        if short:
+            out[-1]["side"] = "sell"
     flat = plan.get("flat_by") or cfg.get("flat_by") or FLAT_BY
     if _hhmm(flat) is None:
         raise AlertError("the plan's flat_by %r is not a time like 15:10" % flat)
     out.append({"id": "%s-flat-by" % low, "symbol": sym, "type": "time", "at": flat, "label": "flat by close"})
     broker = broker_key(cfg.get("broker"))
     out.append({"id": "%s-square-off" % low, "symbol": sym, "type": "square_off", "broker": broker})
+    if short:
+        for r in out[-2:]:
+            r["side"] = "sell"
     if plan.get("date"):
         for r in out:
             r["date"] = str(plan["date"])
@@ -833,6 +865,8 @@ def cmd_add(a):
             rule["rearm"] = True
         if a.note:
             rule["note"] = a.note
+    if getattr(a, "side", None) and rule["type"] in ("stop", "target", "time", "square_off"):
+        rule["side"] = a.side
     if a.date:
         rule["date"] = a.date
     validate(rule)
@@ -923,6 +957,8 @@ def main(argv=None):
     p.add_argument("--label", help="what a time alert says, e.g. \"flat by close\"")
     p.add_argument("--date", help="watch this rule on this IST date only (YYYY-MM-DD)")
     p.add_argument("--direction", choices=["up", "down"])
+    p.add_argument("--side", choices=["buy", "sell"],
+                   help="sell for a short: its stop rings on the way UP and its target on the way down")
     p.add_argument("--rearm", action="store_true")
     p.add_argument("--note")
     p.add_argument("--id")

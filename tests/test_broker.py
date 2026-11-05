@@ -964,6 +964,124 @@ class Flow(unittest.TestCase):
         self.assertIn("whole shares", err)
 
 
+SHORT_CFG = dict(CFG, budget=300000, allow_short=True, allow_margin=True, mis_margin_pct=20)
+
+
+class ShortPositions(unittest.TestCase):
+    """A short sale: the portfolio holds negative shares, the proceeds are not spendable cash
+    (the broker blocks intraday margin instead) and the position is closed by a BUY."""
+
+    def setUp(self):
+        self.d = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.d, True)
+        self.pf = os.path.join(self.d, "portfolio.json")
+        self.cfg_path = os.path.join(self.d, "config.json")
+        with io.open(self.cfg_path, "w", encoding="utf-8") as fh:
+            json.dump(SHORT_CFG, fh)
+        self.plan = os.path.join(self.d, "plan.json")
+        with io.open(self.plan, "w", encoding="utf-8") as fh:
+            json.dump({"symbol": "INFY", "side": "sell", "entry": 1127.15, "stop": 1133.30,
+                       "target": 1114.90, "flat_by": "15:00", "date": "2026-10-29"}, fh)
+
+    def short(self, qty=66, price=1127.15, cfg=None):
+        return ticket.apply_fill(self.pf, cfg or SHORT_CFG, "INFY", "sell", qty, price, "2026-10-29", "MIS")
+
+    def test_a_short_sale_blocks_margin_instead_of_crediting_the_proceeds(self):
+        pf = self.short()
+        pos = pf["positions"][0]
+        self.assertEqual(pos["shares"], -66)
+        self.assertEqual(pos["lots"][0]["proceeds"], 74391.90)
+        self.assertEqual(pos["lots"][0]["blocked"], 14878.38)      # 20% of 74,391.90
+        self.assertEqual(pf["cash"], 285121.62)                    # 300,000 - the blocked margin
+        self.assertEqual(ticket.position_shares(self.pf, "INFY"), -66)
+
+    def test_a_short_sale_is_refused_without_allow_short(self):
+        with self.assertRaises(ticket.TicketError) as e:
+            self.short(cfg=dict(SHORT_CFG, allow_short=False))
+        self.assertIn("short sales are not recorded", str(e.exception))
+        self.assertFalse(os.path.exists(self.pf))
+
+    def test_buying_back_releases_the_margin_and_books_the_profit(self):
+        self.short()
+        pf = ticket.apply_fill(self.pf, SHORT_CFG, "INFY", "buy", 66, 1114.90, "2026-10-29", "MIS")
+        self.assertEqual(pf["positions"], [])
+        self.assertEqual(pf["cash"], 300808.50)                    # 66 * (1127.15 - 1114.90)
+        self.assertEqual(ticket.position_shares(self.pf, "INFY"), 0)
+
+    def test_buying_back_at_a_worse_price_books_the_loss(self):
+        self.short()
+        pf = ticket.apply_fill(self.pf, SHORT_CFG, "INFY", "buy", 66, 1133.30, "2026-10-29", "MIS")
+        self.assertEqual(pf["cash"], 299594.10)                    # 66 * (1127.15 - 1133.30)
+        self.assertEqual(pf["positions"], [])
+
+    def test_a_partial_cover_leaves_the_rest_short(self):
+        self.short()
+        pf = ticket.apply_fill(self.pf, SHORT_CFG, "INFY", "buy", 33, 1114.90, "2026-10-29", "MIS")
+        pos = pf["positions"][0]
+        self.assertEqual(pos["shares"], -33)
+        self.assertEqual(pos["lots"][0]["shares"], -33)
+        self.assertEqual(pos["lots"][0]["blocked"], 7439.19)
+        self.assertEqual(pf["cash"], 292965.06)   # 285,121.62 + 7,439.19 released + 33 * 12.25
+
+    def test_buying_more_than_the_short_is_refused(self):
+        self.short()
+        with self.assertRaises(ticket.TicketError) as e:
+            ticket.apply_fill(self.pf, SHORT_CFG, "INFY", "buy", 67, 1114.90, "2026-10-29", "MIS")
+        self.assertIn("crosses from short to long", str(e.exception))
+
+    def test_selling_more_than_a_long_holds_is_refused(self):
+        ticket.apply_fill(self.pf, SHORT_CFG, "INFY", "buy", 10, 1100.0, "2026-10-29", "MIS")
+        with self.assertRaises(ticket.TicketError) as e:
+            ticket.apply_fill(self.pf, SHORT_CFG, "INFY", "sell", 11, 1120.0, "2026-10-29", "MIS")
+        self.assertIn("the portfolio holds 10", str(e.exception))
+
+    def flatten(self, *extra):
+        return run(["flatten", "--symbol", "INFY", "--orders", os.path.join(self.d, "orders.json"),
+                    "--portfolio", self.pf, "--plan", self.plan, "--config", self.cfg_path,
+                    "--state", os.path.join(self.d, "state.json"),
+                    "--now", "2026-10-29 14:55"] + list(extra))
+
+    def test_flatten_buys_back_a_short(self):
+        self.short()
+        code, text, err = self.flatten()
+        self.assertEqual(code, 0, err)
+        self.assertIn("a short: buy to cover", text)
+        self.assertIn("BUY 66 shares of INFY on NSE, market order, intraday (MIS)", text)
+        self.assertIn("there is nothing to buy back", text)
+        self.assertIn("A buy that only covers a short you already hold", text)
+        self.assertIn("an open SL-M" + chr(10) + "     BUY", text)
+        self.assertIn("do NOT send the buy back", text)
+        with io.open(os.path.join(self.d, "orders.json"), encoding="utf-8") as fh:
+            order = json.load(fh)["orders"][0]
+        self.assertEqual((order["side"], order["qty"]), ("buy", "66"))
+        self.assertIn("buys back the INFY day trade", order["why"])
+
+    def test_flatten_still_sells_a_long(self):
+        ticket.apply_fill(self.pf, SHORT_CFG, "INFY", "buy", 20, 1100.0, "2026-10-29", "MIS")
+        code, text, err = self.flatten()
+        self.assertEqual(code, 0, err)
+        self.assertIn("SELL 20 shares of INFY", text)
+        self.assertNotIn("buy to cover", text)
+        self.assertIn("do NOT send the sell", text)
+
+    def test_flatten_side_overrides_the_portfolio(self):
+        code, text, err = self.flatten("--qty", "40", "--side", "buy")
+        self.assertEqual(code, 0, err)
+        self.assertIn("BUY 40 shares of INFY", text)
+
+    def test_nothing_to_flatten(self):
+        code, _, err = self.flatten()
+        self.assertEqual(code, 1)
+        self.assertIn("no INFY position in", err)
+
+    def test_a_short_entry_keeps_the_entry_window(self):
+        w = {"symbol": "INFY", "side": "sell", "product": "MIS", "qty": "66",
+             "stop_loss_stop_price": 1133.30}
+        self.assertEqual(ticket.kind_of(w, None), "entry")          # no recorded kind: still an entry
+        self.assertEqual(ticket.kind_of(w, {"kind": "exit"}), "exit")
+        self.assertEqual(ticket.kind_of({"side": "sell"}, None), "exit")
+
+
 class TargetOrders(unittest.TestCase):
     """The live target: a Robo bracket on Angel One, a resting LIMIT on Zerodha (and on request), or watched."""
 

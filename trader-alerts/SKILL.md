@@ -36,6 +36,7 @@ python3 "${CLAUDE_SKILL_DIR}/alerts.py" add --from-plan                # stop, t
 python3 "${CLAUDE_SKILL_DIR}/alerts.py" add --opening-bell
 python3 "${CLAUDE_SKILL_DIR}/alerts.py" add --symbol RELIANCE --stop 1295.50
 python3 "${CLAUDE_SKILL_DIR}/alerts.py" add --symbol RELIANCE --target 1304.50
+python3 "${CLAUDE_SKILL_DIR}/alerts.py" add --symbol INFY --stop 1133.30 --side sell   # a short: rings on the way up
 python3 "${CLAUDE_SKILL_DIR}/alerts.py" add --at 15:10 --label "flat by close" --symbol RELIANCE
 python3 "${CLAUDE_SKILL_DIR}/alerts.py" add --square-off --symbol RELIANCE --broker angelone
 python3 "${CLAUDE_SKILL_DIR}/alerts.py" add --symbol INFY --pct 3
@@ -58,7 +59,7 @@ trades NSE only.
 
 | file | what |
 | --- | --- |
-| `trader/plan.json` | the trade from trader-exit, for `add --from-plan` |
+| `trader/plan.json` | the trade from trader-exit, for `add --from-plan`, including its `side` |
 | `trader/config.json` | `broker` (`zerodha` or `angelone`, for the square-off time) and `flat_by` when the plan has none |
 | `trader/alerts.json` | the rules (`alerts.example.json` in this folder) |
 | `trader/state/alerts.json` | which rules rang and when, so each rings once |
@@ -69,8 +70,9 @@ trades NSE only.
 
 | type | rings when | rings again |
 | --- | --- | --- |
-| `above` / `target` | price at or above `price` | after `reset`, or on its own if `"rearm": true` and the price fell back |
-| `below` / `stop` | price at or below `price` | same |
+| `above` | price at or above `price` | after `reset`, or on its own if `"rearm": true` and the price fell back |
+| `below` | price at or below `price` | same |
+| `stop` / `target` | the plan's levels, which way round depends on `"side"`: on a long (the default) the stop rings at or below and the target at or above; on a short (`"side": "sell"`) the stop rings at or **above** and the target at or **below** | same |
 | `pct_move` | moved `pct` percent from the previous close (or `ref`), optional `direction` up or down | once per day at most |
 | `time` | the IST clock passed `at` ("15:10") on a trading day | once per trading day |
 | `square_off` | 5 minutes before the broker's MIS auto square-off (Zerodha 15:25, so 15:20; Angel One 15:10, so 15:05), if `trader/portfolio.json` still holds the symbol (or there is no portfolio file) | once per trading day |
