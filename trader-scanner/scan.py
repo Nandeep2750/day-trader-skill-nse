@@ -108,6 +108,10 @@ NSE_LISTS = {  # --index -> (file name, path under NSE_URL)
     "all": ("EQUITY_L.csv", "equities/EQUITY_L.csv"),
     "nifty500": ("ind_nifty500list.csv", "indices/ind_nifty500list.csv"),
 }
+# The F&O underlyings, one row a symbol. Needed because a scrip's close and its broker
+# square-off now depend on whether it has F&O contracts, and because SEBI's short selling
+# framework (Annexure-1, clause 7) makes only F&O scrips eligible for short selling.
+FO_LOTS = ("fo_mktlots.csv", "fo/fo_mktlots.csv")
 SPARK_MAX = 20      # Yahoo's spark answers 400 above 20 symbols
 PAUSE = 0.3         # seconds between requests: be polite to free endpoints
 BACKOFF = 5.0       # seconds to wait before the one retry after a 429
@@ -150,6 +154,16 @@ CALENDAR_YEARS = (2026,)   # NSE publishes next year's list in December: add 202
 OPEN = datetime.time(9, 15)
 CLOSE = datetime.time(15, 30)
 REQUIRED_UNTIL = datetime.time(15, 15)  # the 3:15 / 3:20 / 3:25 bars are never required (see orb)
+
+# SEBI's Closing Auction Session (CAS) moved the end of continuous trading, and moves it
+# again. From 2026-08-03 an F&O-eligible scrip stops continuous trading at 15:15 and the
+# auction runs after it, while every other scrip still runs to 15:30. From 2026-12-07 (the
+# SEBI circular of 2026-10-15) continuous trading runs to 15:30 for every scrip and the
+# auction moves to 15:30 to 15:40. An order is only ever placed in continuous trading, so
+# that is the close session() reports.
+CAS_FNO_FROM = datetime.date(2026, 8, 3)       # F&O scrips' continuous close moved to 15:15
+CAS_ALL_DAY_FROM = datetime.date(2026, 12, 7)  # continuous close back to 15:30 for every scrip
+CAS_CLOSE = datetime.time(15, 15)
 
 SETUPS = [
     ("breakout_20d", "20-day closing-high breakout"),
@@ -214,12 +228,22 @@ def trading_day(d):
     return True, ""
 
 
-def session(d):
-    """(open_time, close_time) in IST, or None if closed all day. NSE has no early closes."""
+def continuous_close(d, fno=False):
+    """When continuous trading ends for a scrip on date d (IST). An F&O-eligible scrip inside
+    the first CAS window closes at 15:15; everything else, and every scrip once the revised
+    framework starts, closes at 15:30."""
+    if fno and CAS_FNO_FROM <= d < CAS_ALL_DAY_FROM:
+        return CAS_CLOSE
+    return CLOSE
+
+
+def session(d, fno=False):
+    """(open_time, close_time) of continuous trading in IST, or None if closed all day.
+    Pass fno=True for a scrip with F&O contracts: its close can be earlier (see CAS above)."""
     ok, _ = trading_day(d)
     if not ok:
         return None
-    return OPEN, CLOSE
+    return OPEN, continuous_close(d, fno)
 
 
 def clock_label(t):
@@ -1129,6 +1153,43 @@ def nse_list_text(index, offline_dir=None):
         raise ScanError("nsearchives.nseindia.com answered HTTP %d for %s" % (e.code, fname))
     except (urllib.error.URLError, OSError) as e:
         raise ScanError("could not reach nsearchives.nseindia.com: %s" % getattr(e, "reason", e))
+
+
+def fno_symbols(offline_dir=None):
+    """The NSE symbols that have F&O contracts, as a frozenset, from fo_mktlots.csv.
+
+    The file is a CSV whose second column is the symbol. Index underlyings (NIFTY,
+    BANKNIFTY) come along harmlessly: no equity scrip shares their name."""
+    fname, rel = FO_LOTS
+    if offline_dir:
+        path = os.path.join(offline_dir, fname)
+        if not os.path.exists(path):
+            raise ScanError("no %s in %s" % (fname, offline_dir))
+        with open(path, encoding="utf-8", errors="replace") as fh:
+            text = fh.read()
+    else:
+        try:
+            text = http_get(NSE_URL + rel, timeout=60)
+        except urllib.error.HTTPError as e:
+            raise ScanError("nsearchives.nseindia.com answered HTTP %d for %s" % (e.code, fname))
+        except (urllib.error.URLError, OSError) as e:
+            raise ScanError("could not reach nsearchives.nseindia.com: %s" % getattr(e, "reason", e))
+    return fno_symbols_from(text, fname)
+
+
+def fno_symbols_from(text, fname=FO_LOTS[0]):
+    """Parse fo_mktlots.csv text into a frozenset of symbols."""
+    out = set()
+    for line in text.splitlines()[1:]:
+        cols = line.split(",")
+        if len(cols) < 2:
+            continue
+        sym = cols[1].strip().upper()
+        if sym and sym != "SYMBOL":
+            out.add(sym)
+    if not out:
+        raise ScanError("%s held no symbols: the file's shape changed" % fname)
+    return frozenset(out)
 
 
 def cmd_universe(a):

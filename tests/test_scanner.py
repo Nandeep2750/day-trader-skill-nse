@@ -1166,3 +1166,33 @@ class VolatileNetwork(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ClosingAuctionSession(unittest.TestCase):
+    """SEBI's CAS moved the end of continuous trading for F&O scrips, then moved it back."""
+
+    def test_an_fno_scrip_closes_early_only_inside_the_first_cas_window(self):
+        before = D(2026, 7, 31)          # before CAS started
+        inside = D(2026, 11, 5)          # F&O scrips stop continuous trading at 15:15
+        after = D(2026, 12, 7)           # the revised framework: everything to 15:30
+        self.assertEqual(scan.continuous_close(before, fno=True), scan.CLOSE)
+        self.assertEqual(scan.continuous_close(inside, fno=True), scan.CAS_CLOSE)
+        self.assertEqual(scan.continuous_close(inside, fno=False), scan.CLOSE)
+        self.assertEqual(scan.continuous_close(after, fno=True), scan.CLOSE)
+
+    def test_session_reports_the_scrips_own_close(self):
+        self.assertEqual(scan.session(D(2026, 11, 5), fno=True), (scan.OPEN, scan.CAS_CLOSE))
+        self.assertEqual(scan.session(D(2026, 11, 5)), (scan.OPEN, scan.CLOSE))
+        self.assertIsNone(scan.session(D(2026, 11, 10), fno=True))   # Diwali Balipratipada
+
+    def test_fno_symbols_reads_the_market_lots_file(self):
+        syms = scan.fno_symbols(NSE)
+        self.assertIn("ATHERENERG", syms)
+        self.assertIn("GVT&D", syms)        # an ampersand in a symbol survives the split
+        self.assertIn("POLICYBZR", syms)
+        self.assertNotIn("CARTRADE", syms)
+        self.assertNotIn("SYMBOL", syms)    # the header is not a symbol
+
+    def test_a_file_whose_shape_changed_raises(self):
+        with self.assertRaises(scan.ScanError):
+            scan.fno_symbols_from("UNDERLYING,SYMBOL\n")

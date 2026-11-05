@@ -195,7 +195,7 @@ server with the user's own Kite Connect app.
 6. Check it: `get_profile` and `get_margins` (read only).
 
 Zerodha squares off open MIS equity positions automatically from about
-3:20 PM IST (and charges for it); the pack's `flat_by` 15:10 is before that.
+3:25 PM IST (and charges for it); the pack's `flat_by` 15:00 is before that.
 
 ## Setup B: Angel One (community angel-one-mcp server)
 
@@ -307,7 +307,7 @@ put an order tool in `allow`.
   prints the cancel for the other leg: make that call at once, then
   `ticket.py cancelled --symbol RELIANCE --broker-id ID`. A Robo bracket
   cancels its own other leg; confirm in `get_orders`.
-- At the target, or by `flat_by` (15:10 IST), anything still open gets closed:
+- At the target, or by `flat_by` (15:00 IST), anything still open gets closed:
   1. Ask the broker what is held: `get_positions` (read only). If the stop
      already filled, there is nothing to sell.
   2. `ticket.py flatten --symbol RELIANCE --qty 20` writes the flatten

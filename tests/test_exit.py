@@ -23,7 +23,7 @@ WALK_PLAN = {"created_by": "trader-exit", "symbol": "RELIANCE", "exchange": "NSE
              "interval": "5m", "opening_range": {"high": 1170.5, "low": 1156.2, "minutes": 15},
              "stop": 1163.4, "stop_rule": "or_mid", "stop_label": "opening-range midpoint",
              "target": 1185.2, "target_r": 1.0, "target_label": "1R (one times the risk)",
-             "risk_per_share": 10.9, "reward_risk": 1.0, "flat_by": "15:10"}
+             "risk_per_share": 10.9, "reward_risk": 1.0, "flat_by": "15:00"}
 WALK_ENTRY = {"created_by": "trader-entry", "symbol": "RELIANCE", "setup": "orb", "side": "buy",
               "date": "2026-10-29", "status": "triggered", "time": "9:40 AM", "bar_start": "09:35", "bar_index": 4,
               "price": 1174.3, "level": 1170.5, "interval": "5m",
@@ -219,7 +219,7 @@ class Cli(unittest.TestCase):
         self.assertIn("Target        " + R + "1,185.20  1R (one times the risk)", text)
         self.assertIn("Risk a share  " + R + "10.90 (0.93% of the entry)", text)
         self.assertIn("Reward:risk   1.0", text)
-        self.assertIn("Flat by       15:10 IST", text)
+        self.assertIn("Flat by       15:00 IST", text)
         self.assertIn("not a guarantee", text)
         self.assertIn("/trader-timemachine", text)
         self.assertNotIn("pro" + "fit", text.lower())   # never on screen
@@ -301,10 +301,10 @@ class Cli(unittest.TestCase):
         self.assertIn("under your min_reward_risk 1.5", p["warnings"][0])
 
         # a flat-by at or after the broker's MIS auto square-off is warned about, not refused
-        for broker, flat_by, warned, name in (("zerodha", "15:20", True, "Zerodha's MIS auto square-off (15:20)"),
-                                              ("zerodha", "15:15", False, ""),
-                                              ("angelone", "15:15", True, "Angel One's MIS auto square-off (15:15)"),
-                                              ("angelone", "15:10", False, ""),
+        for broker, flat_by, warned, name in (("zerodha", "15:25", True, "Zerodha's MIS auto square-off (15:25)"),
+                                              ("zerodha", "15:20", False, ""),
+                                              ("angelone", "15:10", True, "Angel One's MIS auto square-off (15:10)"),
+                                              ("angelone", "15:05", False, ""),
                                               (None, "15:25", False, "")):
             self.write(os.path.join("trader", "config.json"), {"flat_by": flat_by, "broker": broker})
             code, text, err = self.plan("--json")
@@ -316,7 +316,7 @@ class Cli(unittest.TestCase):
                 self.assertIn(name, " ".join(p["warnings"]))
         self.write(os.path.join("trader", "config.json"), {"broker": "zerodha"})
         code, text, _ = self.plan()
-        self.assertIn("Flat by       15:10 IST", text)               # the default is before both brokers
+        self.assertIn("Flat by       15:00 IST", text)               # the default is before every broker
         self.assertNotIn("square-off", text)
         os.remove(os.path.join("trader", "config.json"))
 

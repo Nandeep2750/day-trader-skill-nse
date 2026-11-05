@@ -62,6 +62,7 @@ import shlex
 import shutil
 import subprocess
 import sys
+import time
 import traceback
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -202,6 +203,56 @@ def load_holidays(skills=SKILLS):
         return dict(NSE_HOLIDAYS_2026), (2026,)
 
 
+# SEBI's Closing Auction Session, mirrored from the scanner so the pack keeps one copy.
+CAS_FNO_FROM = datetime.date(2026, 8, 3)       # F&O scrips' continuous close moved to 15:15
+CAS_ALL_DAY_FROM = datetime.date(2026, 12, 7)  # continuous close back to 15:30 for every scrip
+FO_CACHE = "fo_mktlots.csv"        # under trader/cache/
+FO_CACHE_MAX_AGE = 20 * 3600       # NSE revises the F&O list monthly; a day old is fine
+
+
+def load_fno(skills=SKILLS, project=None):
+    """The symbols with F&O contracts (frozenset), via the scanner, cached for the day under
+    trader/cache/ so a tick does not ask NSE every two minutes.
+
+    An empty set when the list cannot be read at all: every scrip is then treated as non-F&O,
+    which squares a position off earlier than it needs to rather than later than it may."""
+    cache = os.path.join(project, "trader", "cache", FO_CACHE) if project else None
+    if cache and os.path.exists(cache):
+        fresh = time.time() - os.path.getmtime(cache) < FO_CACHE_MAX_AGE
+        got = _fno_from(skills, os.path.dirname(cache))
+        if got and fresh:
+            return got
+    path = os.path.join(skills, "trader-scanner", "scan.py")
+    try:
+        spec = importlib.util.spec_from_file_location("autopilot_scan_fno", path)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        text = mod.http_get(mod.NSE_URL + mod.FO_LOTS[1], timeout=60)
+        syms = mod.fno_symbols_from(text)
+    except Exception:
+        return got if (cache and os.path.exists(cache) and got) else frozenset()
+    if cache:
+        try:
+            os.makedirs(os.path.dirname(cache), exist_ok=True)
+            with open(cache, "w", encoding="utf-8") as fh:
+                fh.write(text)
+        except OSError:
+            pass
+    return syms
+
+
+def _fno_from(skills, offline_dir):
+    """The cached list parsed by the scanner, or an empty set if it will not read."""
+    path = os.path.join(skills, "trader-scanner", "scan.py")
+    try:
+        spec = importlib.util.spec_from_file_location("autopilot_scan_fno_cache", path)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        return mod.fno_symbols(offline_dir)
+    except Exception:
+        return frozenset()
+
+
 def trading_day(d, hol):
     return d.weekday() < 5 and d.isoformat() not in hol
 
@@ -281,7 +332,7 @@ def settings(cfg):
     s["pick"] = pick_settings(auto.get("auto_pick"))
     s["news_at_t"] = parse_hhmm(s["news_at"], "autopilot.news_at")
     s["entry_from_t"] = parse_hhmm(s["entry_from"], "autopilot.entry_from")
-    s["flat_by_t"] = parse_hhmm(cfg.get("flat_by") or "15:10", "flat_by")
+    s["flat_by_t"] = parse_hhmm(cfg.get("flat_by") or "15:00", "flat_by")
     until = cfg.get("no_entries_after", "14:45")
     # missing = 14:45; blank or null = off, as in trader-risk and trader-broker. Entries still stop at
     # flat_by: a position opened after it would have to close at once.
@@ -435,6 +486,7 @@ class Day:
         self.auto_paper = False
         self.cfg = {}
         self.skills = SKILLS
+        self._fno = None
         self.last_stdout = self.last_text = ""
         self.date = now.date().isoformat()
         self.trader = os.path.join(project, "trader")
@@ -450,6 +502,16 @@ class Day:
     def clock(self):
         """The time now: the tick's time plus however long the tick has run so far."""
         return self.now + (now_ist() - self._started)
+
+    @property
+    def fno(self):
+        """The symbols with F&O contracts, read once a tick. Before the earlier of the two
+        cutoffs no scrip can be closed by either, so the list is not fetched at all."""
+        if self.clock().time() < AUTO_SQUARE_OFF_FNO:
+            return frozenset()
+        if self._fno is None:
+            self._fno = load_fno(self.skills, self.project)
+        return self._fno
 
     def save(self):
         write_json(self.state_path, self.state)
@@ -718,7 +780,19 @@ def check_entry(day, sym, s):
 # ---------------------------------------------------------------- auto-paper
 
 PRICE_FRESH = datetime.timedelta(minutes=15)    # the same freshness rule as trader-broker's fresh_price
-AUTO_SQUARE_OFF = datetime.time(15, 15)          # any trade still open now is closed, whatever its plan
+# Any trade still open now is closed, whatever its plan. Two times, because a scrip's
+# broker square-off and its continuous close both depend on whether it has F&O contracts:
+# an F&O scrip is squared off by Angel One at 15:10 and stops continuous trading at 15:15
+# inside the first CAS window, so the autopilot must be out before 15:10, not 15:15.
+AUTO_SQUARE_OFF = datetime.time(15, 10)          # a scrip with no F&O contracts
+AUTO_SQUARE_OFF_FNO = datetime.time(15, 5)       # a scrip with F&O contracts, inside the CAS window
+
+
+def auto_square_off(sym, day_date, fno):
+    """The latest the autopilot will hold this scrip today."""
+    if sym in fno and CAS_FNO_FROM <= day_date < CAS_ALL_DAY_FROM:
+        return AUTO_SQUARE_OFF_FNO
+    return AUTO_SQUARE_OFF
 TRADE_LIVE = ("entering", "open", "exiting")     # a trade in one of these still needs the autopilot
 
 
@@ -811,9 +885,9 @@ def bar_touch(trade, bars, date):
     except (TypeError, ValueError):
         return None, None, None
     try:
-        flat_t = parse_hhmm(trade.get("flat_by") or "15:10", "flat_by")
+        flat_t = parse_hhmm(trade.get("flat_by") or "15:00", "flat_by")
     except AutopilotError:
-        flat_t = datetime.time(15, 10)   # exit_reason's fallback too
+        flat_t = datetime.time(15, 0)    # exit_reason's fallback too
     first = (entered + datetime.timedelta(minutes=1)).strftime("%Y-%m-%d %H:%M")
     flat = "%s %s" % (date, flat_t.strftime("%H:%M"))
     for b in sorted((b for b in bars if isinstance(b, dict)), key=lambda b: str(b.get("start"))):
@@ -1022,9 +1096,10 @@ def adopt_fills(day, syms):
                  "(stop %s, target %s)." % (sym, plan.get("stop"), plan.get("target")), True)
 
 
-def exit_reason(trade, quote, clock):
+def exit_reason(trade, quote, clock, cutoff=None):
     """(reason, price) to exit at, or (None, None). The stop exits at the stop price (an SL-M is
-    assumed to fill at its trigger; slippage is not modelled); everything else at the quote."""
+    assumed to fill at its trigger; slippage is not modelled); everything else at the quote.
+    cutoff is this scrip's hard close (see auto_square_off); it defaults to the non-F&O one."""
     if trade.get("carried_from"):
         return "carried over", quote
     stop, target = trade.get("stop"), trade.get("target")
@@ -1032,14 +1107,15 @@ def exit_reason(trade, quote, clock):
         return "stop", float(stop)
     if quote is not None and target is not None and quote >= float(target):
         return "target", quote
-    if clock.time() >= AUTO_SQUARE_OFF:
-        return "auto square-off", quote
     try:
-        flat_t = parse_hhmm(trade.get("flat_by") or "15:10", "flat_by")
+        flat_t = parse_hhmm(trade.get("flat_by") or "15:00", "flat_by")
     except AutopilotError:
-        flat_t = datetime.time(15, 10)
+        flat_t = datetime.time(15, 0)
     if clock.time() >= flat_t:
         return "flat-by", quote
+    # The backstop, for a trade whose flat_by is missing or later than this scrip can safely hold.
+    if clock.time() >= (cutoff or AUTO_SQUARE_OFF):
+        return "auto square-off", quote
     return None, None
 
 
@@ -1052,18 +1128,20 @@ def auto_exits(day):
     quotes = quotes_for(day, open_syms)
     bars = bars_for(day, [s for s in open_syms if not trades[s].get("carried_from")])
     clock = day.clock()
+    fno = day.fno
     for sym in open_syms:
         tr = trades[sym]
+        cutoff = auto_square_off(sym, day.now.date(), fno)
         reason, price, bar = bar_touch(tr, bars.get(sym) or [], day.date)
         if reason:
             tr["touch_bar"] = bar
         else:
             tr.pop("touch_bar", None)
-            reason, price = exit_reason(tr, quotes.get(sym), clock)
+            reason, price = exit_reason(tr, quotes.get(sym), clock, cutoff)
         if not reason:
             continue
         if price is None:
-            loud = clock.time() >= AUTO_SQUARE_OFF
+            loud = clock.time() >= cutoff
             day.note("auto-noquote:%s:%s" % (sym, "eod" if loud else reason),
                      ("AUTO-PAPER ALARM: %s is still open at %s and there is no fresh quote to close it. It retries "
                       "every tick and carries over to the next trading day." if loud else

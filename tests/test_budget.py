@@ -23,7 +23,7 @@ EXAMPLE_CFG = {
     "budget": 100000, "cash_buffer_pct": 10, "max_position_pct": 75, "max_order_inr": 80000, "min_order_inr": 500,
     "max_loss_per_trade_inr": 1000, "max_daily_loss_inr": 3000, "max_trades_per_day": 3, "max_orders_per_day": 10,
     "min_reward_risk": 1.0, "require_stop": True,
-    "no_entries_before": "09:30", "no_entries_after": "14:45", "flat_by": "15:10",
+    "no_entries_before": "09:30", "no_entries_after": "14:45", "flat_by": "15:00",
     "broker": "zerodha", "product": "MIS", "paper": True, "blocked": [],
     "allow_options": False, "allow_margin": False, "mis_margin_pct": 20, "allow_short": False,
     "include_charges": True,

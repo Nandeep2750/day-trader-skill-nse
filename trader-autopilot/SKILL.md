@@ -132,9 +132,9 @@ run trader-broker's `ticket.py`, and only these calls (checked before every run)
 | a 1-minute bar after the entry reached the stop or the target | closes at the stop price or the target price, even if the price was back by the next tick: a 2-minute check misses a wick between two checks, the bars do not. The first such bar decides; a bar that reached both counts as the stop (the order inside a bar is unknown; the Time Machine's rule too). Bars start the minute after the fill's minute, so nothing from before the buy counts; bars from `flat_by` on are left to the flat-by exit. The note says when ("touched at 10:11, booked at 10:30"); the journal's exit time is the touch time, `booked_at` the tick that booked it. If the bars cannot be read, the quote rules below decide alone |
 | quote at or under the stop | closes at the stop price (an SL-M is assumed to fill at its trigger; slippage is not modelled); retried every tick while the price stays there |
 | quote at or over the target | closes at the quote |
-| `flat_by` (15:10) | closes at the latest fresh quote |
-| 15:15, anything still open | "auto square-off" at the latest fresh quote (the safety net before the brokers' MIS square-off) |
-| no fresh quote | never a made-up price: it retries every tick; at 15:15 and later it raises a loud alarm, and an unclosed trade carries over to the next trading day and is closed at its first fresh quote |
+| `flat_by` (15:00) | closes at the latest fresh quote |
+| 15:05 (F&O scrip) or 15:10, anything still open | "auto square-off" at the latest fresh quote: the safety net before the broker's MIS square-off. An F&O-eligible scrip is squared off earlier because Angel One closes it at 15:10 and, until 2026-12-07, its continuous trading ends at 15:15 |
+| no fresh quote | never a made-up price: it retries every tick; at the scrip's square-off and later it raises a loud alarm, and an unclosed trade carries over to the next trading day and is closed at its first fresh quote |
 | a close | `ticket.py flatten` for the trade's own quantity (not everything held), a fresh trader-risk PASS, `show --json`, saved as "exiting", `approve --auto-paper`, `result --status paper`. Notified as "AUTO-PAPER SELL ... P&L". |
 | a step left half done (a crash, a refused result) | next tick: an approved ticket with no result gets its paper result (matched by fingerprint, never approved twice); a paper buy filled today with no trade record is adopted, with the stop and target from the plan snapshot |
 

@@ -358,7 +358,7 @@ class Rules(unittest.TestCase):
             plan = json.load(fh)
         del plan["flat_by"]
         self.assertEqual(alerts.rules_from_plan(plan, {"flat_by": "14:00"})[2]["at"], "14:00")
-        self.assertEqual(alerts.rules_from_plan(plan)[2]["at"], "15:10")
+        self.assertEqual(alerts.rules_from_plan(plan)[2]["at"], "15:00")
         with self.assertRaises(alerts.AlertError):
             alerts.rules_from_plan(plan, {"broker": "alpaca"})
 
@@ -384,29 +384,29 @@ class Rules(unittest.TestCase):
         self.assertEqual(st["rung"]["t"], "2026-11-11T09:40:00Z")
 
     def test_square_off_warning_five_minutes_before_the_broker(self):
-        self.assertEqual(alerts.square_off_warning("zerodha"), (datetime.time(15, 20), datetime.time(15, 15)))
-        self.assertEqual(alerts.square_off_warning("Angel One"), (datetime.time(15, 15), datetime.time(15, 10)))
+        self.assertEqual(alerts.square_off_warning("zerodha"), (datetime.time(15, 25), datetime.time(15, 20)))
+        self.assertEqual(alerts.square_off_warning("Angel One"), (datetime.time(15, 10), datetime.time(15, 5)))
         z = plan_rules()[3:]
-        self.assertEqual(self.at("2026-11-03 15:14", z, held={"RELIANCE"})[0], [])
-        rings, st = self.at("2026-11-03 15:15", z, held={"RELIANCE"})
+        self.assertEqual(self.at("2026-11-03 15:19", z, held={"RELIANCE"})[0], [])
+        rings, st = self.at("2026-11-03 15:20", z, held={"RELIANCE"})
         self.assertEqual(len(rings), 1)
-        self.assertIn("Square-off in 5 minutes: Zerodha auto squares off intraday (MIS) positions at 15:20 IST",
+        self.assertIn("Square-off in 5 minutes: Zerodha auto squares off intraday (MIS) positions at 15:25 IST",
                       rings[0]["message"])
         self.assertIn("RELIANCE is still open", rings[0]["message"])
         self.assertIn("trader-broker flatten --symbol RELIANCE", rings[0]["message"])
-        self.assertEqual(self.at("2026-11-03 15:16", z, st, held={"RELIANCE"})[0], [])
+        self.assertEqual(self.at("2026-11-03 15:21", z, st, held={"RELIANCE"})[0], [])
         a = plan_rules({"broker": "angelone"})[3:]
-        self.assertEqual(self.at("2026-11-03 15:09", a, held={"RELIANCE"})[0], [])
-        self.assertIn("Angel One auto squares off", self.at("2026-11-03 15:10", a, held={"RELIANCE"})[0][0]["message"])
+        self.assertEqual(self.at("2026-11-03 15:04", a, held={"RELIANCE"})[0], [])
+        self.assertIn("Angel One auto squares off", self.at("2026-11-03 15:05", a, held={"RELIANCE"})[0][0]["message"])
 
     def test_square_off_stays_quiet_when_flat(self):
         z = plan_rules()[3:]
-        rings, st = self.at("2026-11-03 15:15", z, held=set())
+        rings, st = self.at("2026-11-03 15:20", z, held=set())
         self.assertEqual(rings, [])
         self.assertNotIn("reliance-square-off", st["rung"])
-        rings, _ = self.at("2026-11-03 15:17", z, st, held={"RELIANCE"})    # a fill landed: still rings
+        rings, _ = self.at("2026-11-03 15:22", z, st, held={"RELIANCE"})    # a fill landed: still rings
         self.assertEqual(len(rings), 1)
-        rings, _ = self.at("2026-11-03 15:15", z, held=None)                 # no portfolio: rings, worded "may"
+        rings, _ = self.at("2026-11-03 15:20", z, held=None)                 # no portfolio: rings, worded "may"
         self.assertIn("RELIANCE may still be open", rings[0]["message"])
 
     def test_the_example_rules_are_valid(self):
@@ -447,7 +447,7 @@ class Cli(unittest.TestCase):
                              "--config", os.path.join(self.d, "none")])
         self.assertEqual(code, 0)
         self.assertIn("Added reliance-square-off", text)
-        self.assertIn("Zerodha auto squares off MIS positions at 15:20 IST: the square-off alert rings at 15:15",
+        self.assertIn("Zerodha auto squares off MIS positions at 15:25 IST: the square-off alert rings at 15:20",
                       text)
         self.assertEqual(run(["add", "--rules", self.rules, "--opening-bell"])[0], 0)
         with open(self.pf, "w") as fh:
@@ -471,10 +471,10 @@ class Cli(unittest.TestCase):
         code, text, _ = self.check("2026-11-03 15:10")
         self.assertEqual(code, 0)
         self.assertIn("ALERT Flat by close", text)
-        code, text, _ = self.check("2026-11-03 15:15")
+        code, text, _ = self.check("2026-11-03 15:20")
         self.assertEqual(code, 0)
         self.assertIn("ALERT Square-off in 5 minutes", text)
-        self.assertEqual(self.check("2026-11-03 15:17")[0], 1)
+        self.assertEqual(self.check("2026-11-03 15:22")[0], 1)
         code, text, _ = self.check("2026-11-04 09:20")
         self.assertIn("ALERT Opening bell", text)
         code, text, _ = self.check("2026-11-04 09:25")
@@ -495,7 +495,7 @@ class Cli(unittest.TestCase):
             json.dump({"broker": "angelone"}, fh)
         code, text, _ = run(["add", "--from-plan", "--plan", PLAN, "--rules", self.rules, "--state", self.state,
                              "--config", cfg])
-        self.assertIn("Angel One auto squares off MIS positions at 15:15 IST: the square-off alert rings at 15:10",
+        self.assertIn("Angel One auto squares off MIS positions at 15:10 IST: the square-off alert rings at 15:05",
                       text)
         code, text, _ = run(["add", "--rules", self.rules, "--square-off", "--symbol", "infy.ns", "--config", cfg])
         self.assertEqual(code, 0)

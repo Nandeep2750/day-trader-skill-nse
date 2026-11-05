@@ -90,7 +90,7 @@ DEFAULTS = {
     "require_stop": True,
     "no_entries_before": "09:30",
     "no_entries_after": "14:45",
-    "flat_by": "15:10",
+    "flat_by": "15:00",
     "broker": "zerodha",
     "product": "MIS",
     "paper": True,

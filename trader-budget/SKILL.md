@@ -64,7 +64,7 @@ amount is in rupees.
 - The day limits trader-risk enforces: **max_daily_loss_inr** (3,000), **max_trades_per_day** (3),
   **min_reward_risk** (1.0), **require_stop** (true), **no_entries_before** / **no_entries_after**
   ("09:30" / "14:45") and **flat_by** ("15:10"), all IST. Keep flat_by before the broker's MIS auto
-  square-off (Zerodha 15:20, Angel One 15:15).
+  square-off (Zerodha 15:25, Angel One 15:10).
 - **broker**: "zerodha" or "angelone" (sets the brokerage in the charges estimate and where
   trader-broker sends orders). **product**: "MIS" (intraday, the default) or "CNC" (delivery).
 - **include_charges** (true): count the estimated round-trip charges inside the max loss.

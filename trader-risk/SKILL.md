@@ -124,7 +124,7 @@ How the numbers work:
 
 Warnings do not block, but say them to the user: a LIVE account, a plan entry
 too old to use, a flat_by at
-or after the broker's MIS auto square-off (Zerodha 15:20, Angel One 15:15; the
+or after the broker's MIS auto square-off (Zerodha 15:25, Angel One 15:10; the
 broker would close the position at the market and charge a fee), an order
 with no exchange or product (taken as NSE and the config's product), a stop
 that lives only in the plan and not at the broker (paper only; live, it

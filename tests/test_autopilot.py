@@ -917,9 +917,9 @@ class AutoPaper(Base):
         r = FakeRunner(self.project, entry={"CARTRADE": "triggered"})
         self.tick("09:50", r)
         r.quotes = {"CARTRADE": 2350.0}
-        self.tick("15:08", r)
+        self.tick("14:58", r)
         self.assertEqual(self.ticket_calls(r, "flatten"), [])
-        self.tick("15:10", r)
+        self.tick("15:00", r)
         tr = self.state()["trades"]["CARTRADE"]
         self.assertEqual((tr["exit_reason"], tr["exit_price"]), ("flat-by", 2350.0))
 
@@ -981,7 +981,7 @@ class AutoPaper(Base):
             s = ap.settings({"no_entries_after": off, "flat_by": "15:05", "autopilot": base})
             self.assertEqual(s["entry_until_t"], datetime.time(15, 5))
         s = ap.settings({"no_entries_after": "15:20", "autopilot": base})
-        self.assertEqual(s["entry_until_t"], datetime.time(15, 10))
+        self.assertEqual(s["entry_until_t"], datetime.time(15, 0))
 
 
 class AutoPaperHardening(Base):
@@ -1443,7 +1443,7 @@ class MorningPick(Base):
                 ap.pick_settings(bad)
         s = ap.settings({"autopilot": {"stop": "pct:1.5", "target": "1.5R"}})
         self.assertEqual(ap.pick_rule(s), (["--stop-rule", "pct", "--stop-pct", "1.5", "--target-r", "1.5",
-                                            "--until", "15:10"], ""))
+                                            "--until", "15:00"], ""))
         with self.assertRaises(ap.AutopilotError):
             ap.pick_settings({"at": "09:20", "until": "09:00"})
 
@@ -1510,3 +1510,49 @@ class SkillDoc(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class FnoAwareSquareOff(unittest.TestCase):
+    """A scrip with F&O contracts has to be out earlier: Angel One squares it off at 15:10
+    and, until the revised CAS starts, its continuous trading ends at 15:15."""
+
+    FNO = frozenset({"ATHERENERG", "POLICYBZR"})
+
+    def test_the_cutoff_depends_on_the_scrip_and_the_date(self):
+        inside, after = datetime.date(2026, 11, 5), datetime.date(2026, 12, 7)
+        self.assertEqual(ap.auto_square_off("ATHERENERG", inside, self.FNO), ap.AUTO_SQUARE_OFF_FNO)
+        self.assertEqual(ap.auto_square_off("CARTRADE", inside, self.FNO), ap.AUTO_SQUARE_OFF)
+        self.assertEqual(ap.auto_square_off("ATHERENERG", after, self.FNO), ap.AUTO_SQUARE_OFF)
+
+    def test_flat_by_is_read_before_the_backstop(self):
+        def reason(hhmm, flat, cutoff):
+            h, m = (int(x) for x in hhmm.split(":"))
+            clock = datetime.datetime(2026, 11, 5, h, m)
+            trade = {"stop": 1.0, "target": 9e9, "flat_by": flat}
+            return ap.exit_reason(trade, 5.0, clock, cutoff)[0]
+
+        early = datetime.time(15, 5)
+        self.assertIsNone(reason("15:04", "15:10", early))
+        self.assertEqual(reason("15:05", "15:10", early), "auto square-off")   # the backstop is sooner
+        self.assertEqual(reason("15:00", "15:00", early), "flat-by")           # the plan's own time wins
+        # a flat_by later than the scrip can safely hold still gets closed by the backstop
+        self.assertEqual(reason("15:10", "15:25", datetime.time(15, 10)), "auto square-off")
+
+    def test_the_list_is_cached_and_never_fetched_twice(self):
+        proj = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, proj)
+        cache = os.path.join(proj, "trader", "cache", ap.FO_CACHE)
+        os.makedirs(os.path.dirname(cache))
+        with open(cache, "w", encoding="utf-8") as fh:
+            fh.write("UNDERLYING,SYMBOL,NOV-26\nAther Energy Limited,ATHERENERG,900\n")
+        with mock.patch.object(ap, "_fno_from", wraps=ap._fno_from) as spy:
+            syms = ap.load_fno(project=proj)
+        self.assertEqual(syms, frozenset({"ATHERENERG"}))
+        self.assertEqual(spy.call_count, 1)        # read from disk, no request
+
+    def test_an_unreadable_list_treats_every_scrip_as_non_fno(self):
+        proj = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, proj)
+        self.assertEqual(ap.load_fno(skills=proj, project=proj), frozenset())
+        self.assertEqual(ap.auto_square_off("ATHERENERG", datetime.date(2026, 11, 5), frozenset()),
+                         ap.AUTO_SQUARE_OFF)

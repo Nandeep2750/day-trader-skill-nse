@@ -1742,7 +1742,7 @@ def cmd_flatten(a):
                               "and pass --qty if you do hold some" % (sym, a.portfolio))
     plan = read_json(a.plan, "plan", required=False) or {}
     flat_by = (plan.get("flat_by") if str(plan.get("symbol", "")).upper() == sym else None) \
-        or cfg.get("flat_by") or "15:10"
+        or cfg.get("flat_by") or "15:00"
     product = position_product(a.portfolio, sym) or str(cfg.get("product") or "MIS").upper()
     order = {"symbol": sym, "exchange": "NSE", "product": product, "side": "sell", "qty": _str_num(qty),
              "type": "market", "time_in_force": "day",

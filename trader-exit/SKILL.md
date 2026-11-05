@@ -8,7 +8,7 @@ description: >-
   price on the NSE tick for its price band without ever growing the risk, and
   sets the target at 2R (or 1R, or your price). Refuses a stop at or above
   the entry, a target at or below it, or a stop too tight to survive the
-  spread, and says why. Flat by 15:10 IST by default, before Zerodha's and
+  spread, and says why. Flat by 15:00 IST by default, before Zerodha's and
   Angel One's intraday auto square-off. Writes trader/plan.json for the Time
   Machine, the Budget Manager and Price Alerts. Long side only. Use when the
   user says "where's my stop", "set my stop and target", "plan the exit",
@@ -48,7 +48,7 @@ Other flags: `--flat-by 15:10`, `--json`, `--now "2026-10-29 09:41"` (IST),
 | file | what |
 | --- | --- |
 | `trader/entry.json` | the trigger from trader-entry: symbol, entry price, time, bar, opening range |
-| `trader/config.json` | `flat_by` (15:10), `min_reward_risk` (1.0: a note here, trader-risk enforces it) and `broker` (`zerodha` or `angelone`, for the square-off warning) |
+| `trader/config.json` | `flat_by` (15:00), `min_reward_risk` (1.0: a note here, trader-risk enforces it) and `broker` (`zerodha` or `angelone`, for the square-off warning) |
 | Yahoo chart API | only for an `atr:K` stop: the session's bars for `SYMBOL.NS` up to the entry bar, free and unofficial |
 | `trader/plan.json` | with `--write`: symbol, exchange (NSE), entry, stop and its rule, target and its R, risk a share, reward:risk, flat by. trader-timemachine, trader-budget and trader-alerts read it |
 
@@ -79,10 +79,10 @@ A level setup has no opening range to lean on, so it needs a stop you name.
   below it. A risk under 0.05% of the price: too tight to survive the
   spread, normal wiggle would stop you out. An entry.json that has not
   triggered (unless you give `--entry`). A short: v2 plans longs only.
-- **Flat by.** 15:10 IST by default (or `flat_by` in the config). Out by
+- **Flat by.** 15:00 IST by default (or `flat_by` in the config). Out by
   then, win or lose, no overnight hold. Brokers square off intraday (MIS)
   positions themselves near the close, at the market and with a fee:
-  Zerodha from 15:20, Angel One from 15:15. A flat-by at or after your
+  Zerodha from 15:25, Angel One from 15:10. A flat-by at or after your
   broker's square-off gets a warning. A flat-by at or after the 15:30 close,
   or an entry at or after the flat-by time, is refused.
 

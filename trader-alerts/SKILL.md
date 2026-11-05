@@ -73,12 +73,12 @@ trades NSE only.
 | `below` / `stop` | price at or below `price` | same |
 | `pct_move` | moved `pct` percent from the previous close (or `ref`), optional `direction` up or down | once per day at most |
 | `time` | the IST clock passed `at` ("15:10") on a trading day | once per trading day |
-| `square_off` | 5 minutes before the broker's MIS auto square-off (Zerodha 15:20, so 15:15; Angel One 15:15, so 15:10), if `trader/portfolio.json` still holds the symbol (or there is no portfolio file) | once per trading day |
+| `square_off` | 5 minutes before the broker's MIS auto square-off (Zerodha 15:25, so 15:20; Angel One 15:10, so 15:05), if `trader/portfolio.json` still holds the symbol (or there is no portfolio file) | once per trading day |
 | `opening_bell` | NSE is open (from 9:15 IST) | once per trading day |
 
 A rule with `"date"` is watched on that IST date only; `--from-plan` rules
 carry the plan's date, so yesterday's stop never rings today. The pack's
-default flat-by time is 15:10, before both brokers' auto square-off: a broker
+default flat-by time is 15:00, before every broker's auto square-off: a broker
 square-off is a market order at whatever price, plus a fee.
 
 ## Quotes

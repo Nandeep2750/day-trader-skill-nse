@@ -312,12 +312,12 @@ class NseRules(unittest.TestCase):
 
     def test_flat_by_after_the_auto_square_off_warns(self):
         self.assertEqual(self.one(rel())["warnings"], [])
-        res = self.one(rel(), flat_by="15:20")
+        res = self.one(rel(), flat_by="15:25")
         self.assertEqual(verdicts(res), ["PASS"])
-        self.assertIn("not before Zerodha's MIS auto square-off at 15:20", " ".join(res["warnings"]))
-        res = self.one(rel(), flat_by="15:15", broker="angelone")
-        self.assertIn("Angel One's MIS auto square-off at 15:15", " ".join(res["warnings"]))
-        self.assertEqual(self.one(rel(), flat_by="15:14", broker="angelone")["warnings"], [])
+        self.assertIn("not before Zerodha's MIS auto square-off at 15:25", " ".join(res["warnings"]))
+        res = self.one(rel(), flat_by="15:10", broker="angelone")
+        self.assertIn("Angel One's MIS auto square-off at 15:10", " ".join(res["warnings"]))
+        self.assertEqual(self.one(rel(), flat_by="15:09", broker="angelone")["warnings"], [])
         self.assertIn("not zerodha or angelone", " ".join(self.one(rel(), broker="alpaca")["warnings"]))
 
     def test_margin(self):

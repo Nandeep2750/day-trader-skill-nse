@@ -37,7 +37,7 @@ it, a risk under 0.05% of the price (too tight to survive the spread), an
 entry.json that has not triggered (unless you give --entry), a short (v2
 plans longs only).
 
-flat_by (default 15:10 IST, or "flat_by" in trader/config.json): out by then,
+flat_by (default 15:00 IST, or "flat_by" in trader/config.json): out by then,
 win or lose. Brokers square off MIS (intraday) positions themselves near the
 close: Zerodha from 15:20, Angel One from 15:15. A flat_by at or after your
 broker's ("broker" in the config) gets a warning.
@@ -65,8 +65,15 @@ UA = "Mozilla/5.0 (compatible; day-trader-skill-nse/1.0)"
 BACKOFF = 5.0
 HOSTS = ("query2", "query1")
 INTERVALS = {"1m": 60, "5m": 300}
-DEFAULTS = {"flat_by": "15:10", "min_reward_risk": 1.0, "broker": None}
-SQUARE_OFF = {"zerodha": ("Zerodha", "15:20"), "angelone": ("Angel One", "15:15")}   # MIS auto square-off
+DEFAULTS = {"flat_by": "15:00", "min_reward_risk": 1.0, "broker": None}
+# Broker MIS auto square-off of equity cash positions, IST. The broker sets this itself:
+# there is no SEBI or NSE mandated square-off time, which is why brokers differ. Zerodha
+# moved equity intraday to 15:25 (its own announcement; it was 15:20). Angel One's risk
+# policy gives 15:10 for an F&O-eligible scrip and 15:25 otherwise, while its support page
+# gives a flat 15:15; the earliest is taken, because being early costs slippage and being
+# late costs an auction. trader-autopilot refines this per symbol once it knows whether the
+# scrip has F&O contracts.
+SQUARE_OFF = {"zerodha": ("Zerodha", "15:25"), "angelone": ("Angel One", "15:10")}
 NSE_SYMBOL = re.compile(r"^[A-Z0-9][A-Z0-9&\-]{0,19}$")
 TICKS = ((250, "0.01"), (1000, "0.05"), (5000, "0.10"), (10000, "0.50"), (20000, "1.00"), (None, "5.00"))  # price below X -> tick
 # NSE fixes each stock's tick from the previous month's close, which this pack does not know. Within
@@ -756,7 +763,7 @@ def main(argv=None):
     p.add_argument("--side", default="buy", choices=["buy", "long", "sell", "short"], help="v2: buy only")
     p.add_argument("--stop", help="or-mid (orb default), or-low, price:X, pct:X, atr:K")
     p.add_argument("--target", help="2R (default), 1R, 1.5R, price:X")
-    p.add_argument("--flat-by", help="HH:MM IST (default: config flat_by, 15:10)")
+    p.add_argument("--flat-by", help="HH:MM IST (default: config flat_by, 15:00)")
     p.add_argument("--config", default="trader/config.json")
     p.add_argument("--offline", metavar="PATH", help="saved Yahoo chart JSON for an atr stop")
     p.add_argument("--now", help='pretend it is this IST time, e.g. "2026-10-29 09:40"')

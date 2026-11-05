@@ -223,6 +223,9 @@ PAGE = r"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Autopilot Dashboard</title>
+<!-- A rising saffron line on indigo, the same ink as the page, so the tab is easy to pick out.
+     Inline as a data URI: no extra request and no route to serve. -->
+<link rel="icon" href="data:image/svg+xml,<svg%20xmlns=%22http://www.w3.org/2000/svg%22%20viewBox=%220%200%2032%2032%22><rect%20width=%2232%22%20height=%2232%22%20rx=%227%22%20fill=%22%2316204A%22/><path%20d=%22M6%2022L13%2015L18%2019L26%209%22%20fill=%22none%22%20stroke=%22%23E39B12%22%20stroke-width=%223.4%22%20stroke-linecap=%22round%22%20stroke-linejoin=%22round%22/><circle%20cx=%2226%22%20cy=%229%22%20r=%223.4%22%20fill=%22%2345C99A%22/></svg>">
 <meta name="description" content="Live board for the paper-trading autopilot: the session timeline, open trades, stop and target levels, P&amp;L, events, the log and past days.">
 <link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Hanken+Grotesk:wght@400;500;600;800&display=swap" rel="stylesheet">

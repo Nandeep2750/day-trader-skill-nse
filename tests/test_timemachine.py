@@ -381,7 +381,7 @@ class Plans(unittest.TestCase):
 
     def test_flat_by_is_the_default_until(self):
         self.assertEqual(machine(plan(flat_by="14:00"), replays=100)["mc"]["until"], "14:00")
-        self.assertEqual(machine(plan(flat_by=None), replays=100)["mc"]["until"], "15:10")
+        self.assertEqual(machine(plan(flat_by=None), replays=100)["mc"]["until"], "15:00")
         with self.assertRaises(tm.TMError) as cm:
             machine(plan(flat_by="15:12"), replays=10)
         self.assertIn("flat_by must be on the 5-minute grid", str(cm.exception))
@@ -611,9 +611,9 @@ class Cli(unittest.TestCase):
                                "--offline", RELIANCE, "--now", NOW, "--seed", "29", "--json"])
         self.assertEqual(code, 0, err)
         doc = json.loads(text)
-        self.assertEqual((doc["mc"]["p_target"], doc["mc"]["p_green"], doc["mc"]["until"]), (0.2419, 0.4401, "15:10"))
+        self.assertEqual((doc["mc"]["p_target"], doc["mc"]["p_green"], doc["mc"]["until"]), (0.2281, 0.4358, "15:00"))
         self.assertEqual(doc["plan"]["stop_rule"], "or_mid")
-        self.assertEqual((doc["history"]["target"], doc["history"]["stop"], doc["history"]["avg_R"]), (12, 11, -0.02))
+        self.assertEqual((doc["history"]["target"], doc["history"]["stop"], doc["history"]["avg_R"]), (12, 11, 0.008))
         code, _, err = run(["run", "--symbol", "RELIANCE", "--entry", "1174.30", "--offline", RELIANCE])
         self.assertEqual(code, 1)
         self.assertIn("--stop", err)

@@ -29,7 +29,7 @@ Rule types:
                   (rings once per trading day)
   square_off      5 minutes before the broker's auto square-off of intraday
                   (MIS) positions: Zerodha 15:20 (rings 15:15), Angel One
-                  15:15 (rings 15:10). Rings only if trader/portfolio.json
+                  15:10 (rings 15:05). Rings only if trader/portfolio.json
                   still holds the symbol (or there is no portfolio file)
 
 A rule with "date" is only watched on that IST date (rules from a plan are
@@ -90,9 +90,16 @@ NSE_HOLIDAYS = {  # NSE equity segment trading holidays, 2026 (weekdays only)
 CALENDAR_YEARS = (2026,)   # NSE publishes next year's list in December: add 2027 then
 OPEN = datetime.time(9, 15)
 CLOSE = datetime.time(15, 30)
-FLAT_BY = "15:10"          # the pack's default: before both brokers' auto square-off
-# broker auto square-off of intraday (MIS) equity positions, IST; the alert rings 5 minutes before
-SQUARE_OFF = {"zerodha": datetime.time(15, 20), "angelone": datetime.time(15, 15)}
+FLAT_BY = "15:00"          # the pack's default: before every broker's auto square-off
+# Broker MIS auto square-off of equity cash positions, IST. The broker sets this itself:
+# there is no SEBI or NSE mandated square-off time, which is why brokers differ. Zerodha
+# moved equity intraday to 15:25 (its own announcement; it was 15:20). Angel One's risk
+# policy gives 15:10 for an F&O-eligible scrip and 15:25 otherwise, while its support page
+# gives a flat 15:15; the earliest is taken, because being early costs slippage and being
+# late costs an auction. trader-autopilot refines this per symbol once it knows whether the
+# scrip has F&O contracts.
+# The alert rings 5 minutes before.
+SQUARE_OFF = {"zerodha": datetime.time(15, 25), "angelone": datetime.time(15, 10)}
 BROKER_NAMES = {"zerodha": "Zerodha", "angelone": "Angel One"}
 SQUARE_OFF_LEAD = datetime.timedelta(minutes=5)
 

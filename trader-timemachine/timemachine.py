@@ -31,7 +31,7 @@ How the replays work (the reel's sim.py, same algorithm, same random draws):
      so a bar that touches both counts as the stop (the conservative call).
   4. Outcomes: "target" or "stop" (whichever was touched first), or "neither"
      when the trade is still open at --until (default: the plan's flat_by,
-     else 15:10, before Angel One's 15:15 and Zerodha's 15:20 MIS square-off;
+     else 15:00, before Angel One's 15:10 and Zerodha's 15:25 MIS square-off;
      15:30 at the latest).
      "green" = target first, or above the entry at --until (below for a sell).
      R = the target's R at the target, -1 at the stop, otherwise
@@ -95,7 +95,7 @@ INTERVAL = 300       # 5-minute bars, in seconds
 SESSION_BARS = 75    # 9:15 to 15:30 IST in 5-minute bars
 OPEN_MIN = 9 * 60 + 15
 CLOSE_MIN = 15 * 60 + 30
-FLAT_BY = "15:10"    # default end of a replay: before the brokers' MIS auto square-off
+FLAT_BY = "15:00"    # default end of a replay: before every broker's MIS auto square-off
 MIN_SESSIONS = 20
 SAMPLE_PATHS = 160
 BAND_PATHS = 2000
@@ -1052,7 +1052,7 @@ def main(argv=None):
         p.add_argument("--replays", type=int, default=10000)
         p.add_argument("--seed", type=int, default=19)
         p.add_argument("--window", type=int, default=2, help="draw from the same time of day +- this many bars")
-        p.add_argument("--until", help="end each replay at this IST time (default the plan's flat_by, else 15:10)")
+        p.add_argument("--until", help="end each replay at this IST time (default the plan's flat_by, else 15:00)")
         p.add_argument("--offline", metavar="FILE", help="a saved Yahoo chart JSON (.json or .json.gz), no network")
         p.add_argument("--now", help='pretend it is this time ("2026-10-29 09:45" IST, or ISO with Z)')
 
@@ -1071,7 +1071,7 @@ def main(argv=None):
     p.add_argument("--stop-rule", default="or_mid", choices=["or_mid", "or_low", "pct"])
     p.add_argument("--stop-pct", type=float, help="for --stop-rule pct: the stop as a percent of the entry")
     p.add_argument("--target-r", type=float, default=2.0)
-    p.add_argument("--until", default=FLAT_BY, help="out at this IST time (default 15:10)")
+    p.add_argument("--until", default=FLAT_BY, help="out at this IST time (default 15:00)")
     p.add_argument("--offline", metavar="PATH", help="a saved chart file, or a folder of <SYM>-60d5m.json(.gz)")
     p.add_argument("--now", help='pretend it is this time ("2026-11-04 09:00" IST)')
     p.add_argument("--json", action="store_true")

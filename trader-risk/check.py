@@ -105,7 +105,7 @@ DEFAULTS = {
     "budget": None, "cash_buffer_pct": 10, "max_position_pct": 75, "max_order_inr": 80000,
     "min_order_inr": 500, "max_loss_per_trade_inr": 1000, "max_daily_loss_inr": 3000, "max_trades_per_day": 3,
     "max_orders_per_day": 10, "min_reward_risk": 1.0, "require_stop": True,
-    "no_entries_before": "09:30", "no_entries_after": "14:45", "flat_by": "15:10",
+    "no_entries_before": "09:30", "no_entries_after": "14:45", "flat_by": "15:00",
     "broker": "zerodha", "product": "MIS", "paper": True, "blocked": [], "allow_options": False,
     "allow_margin": False, "mis_margin_pct": 20, "allow_short": False, "allow_delivery": False,
     "include_charges": True,
@@ -125,7 +125,15 @@ FRESH_MINUTES = 15
 ENTRY_STATUSES = ("approved", "declined", "placed", "denied", "failed")
 REF_WORDS = {"plan": "the plan's entry", "price": "the latest price", "limit": "the limit price",
              "stale price": "an old price"}
-SQUARE_OFF = {"zerodha": ("Zerodha", datetime.time(15, 20)), "angelone": ("Angel One", datetime.time(15, 15))}
+# Broker MIS auto square-off of equity cash positions, IST. The broker sets this itself:
+# there is no SEBI or NSE mandated square-off time, which is why brokers differ. Zerodha
+# moved equity intraday to 15:25 (its own announcement; it was 15:20). Angel One's risk
+# policy gives 15:10 for an F&O-eligible scrip and 15:25 otherwise, while its support page
+# gives a flat 15:15; the earliest is taken, because being early costs slippage and being
+# late costs an auction. trader-autopilot refines this per symbol once it knows whether the
+# scrip has F&O contracts.
+SQUARE_OFF = {"zerodha": ("Zerodha", datetime.time(15, 25)),
+              "angelone": ("Angel One", datetime.time(15, 10))}
 
 # NSE cash tick sizes in paise: a price below X rupees moves in steps of this many paise
 TICKS = ((250, 1), (1000, 5), (5000, 10), (10000, 50), (20000, 100), (None, 500))
@@ -292,7 +300,7 @@ def square_off_warning(c):
     name, cut = SQUARE_OFF[broker]
     if flat is not None and str(c.get("product") or "MIS").upper() == "MIS" and flat >= cut:
         return ("flat_by %s is not before %s's MIS auto square-off at %s: the broker will close the "
-                "position for you, at the market, with a fee. Set flat_by earlier (15:10 is the default)"
+                "position for you, at the market, with a fee. Set flat_by earlier (15:00 is the default)"
                 % (flat.strftime("%H:%M"), name, cut.strftime("%H:%M")))
     return None
 
