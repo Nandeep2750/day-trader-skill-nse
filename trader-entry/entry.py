@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Entry Timer for trader-entry: watches a setup bar by bar and says the
-moment to get in. Standard library only. Long side only. It never places an order.
+moment to get in. Standard library only. Both sides. It never places an order.
 
     python3 entry.py check RELIANCE                      # opening-range breakout, 5-minute bars
     python3 entry.py check RELIANCE --now "2026-10-29 09:40" --offline RELIANCE.json
@@ -12,11 +12,12 @@ moment to get in. Standard library only. Long side only. It never places an orde
 NSE cash market only. Symbols are plain NSE symbols (RELIANCE, M&M, BAJAJ-AUTO);
 a trailing .NS is accepted and dropped, a BSE .BO symbol is refused. Times are IST.
 
-Setups (v2 plans longs only):
+Setups (--side sell watches the mirror: a close BELOW the range low):
   orb    opening-range breakout. The range is the high and low of the first
          --or-minutes (default 15: the 9:15, 9:20 and 9:25 five-minute bars).
          It triggers on the first COMPLETED bar after the range that CLOSES
-         above the range high. A wick above the high is not a trigger.
+         above the range high (below the range low with --side sell). A
+         wick past the edge is not a trigger: the bar has to close past it.
   level  the first completed bar that closes above --level (for example a
          20-day high from trader-scanner).
   --min-volume-x X  the trigger bar also needs at least X times the average
@@ -390,22 +391,29 @@ def r2(x):
 
 
 def evaluate(chart, now_utc, setup="orb", or_minutes=15, interval="5m", level=None,
-             min_volume_x=None, cfg=None):
-    """Pure function: the setup's status at now_utc from one session's bars."""
+             min_volume_x=None, cfg=None, side="buy"):
+    """Pure function: the setup's status at now_utc from one session's bars.
+
+    side "sell" watches the mirror: the trigger is the first bar to close BELOW the opening
+    range's low (or below the level), which is the short entry the scanner's orb --down finds."""
     cfg = cfg or dict(DEFAULTS)
     if interval not in INTERVALS:
         raise EntryError("--interval is 5m or 1m")
     step = INTERVALS[interval]
     if or_minutes <= 0 or (or_minutes * 60) % step:
         raise EntryError("--or-minutes must be a whole number of %s bars" % interval)
-    if setup not in ("orb", "level"):
-        raise EntryError("--setup is orb or level")
+    if setup not in ("orb", "orb_down", "level"):
+        raise EntryError("--setup is orb, orb_down or level")
+    side = "sell" if str(side or "buy").lower() in ("sell", "short") else "buy"
+    if setup == "orb_down":
+        side = "sell"
+    long = side == "buy"
     if setup == "level" and level is None:
         raise EntryError("--setup level needs --level PRICE (for example a 20-day high)")
     n_or = or_minutes * 60 // step
     local = to_ist(now_utc)
     day = local.date()
-    res = {"symbol": chart["symbol"], "setup": setup, "side": "buy", "date": day.isoformat(),
+    res = {"symbol": chart["symbol"], "setup": setup, "side": side, "date": day.isoformat(),
            "interval": interval, "or_minutes": or_minutes, "now": local.strftime("%Y-%m-%d %H:%M:%S"), "status": "waiting",
            "phase": "", "reason": "", "opening_range": None, "level": None, "trigger": None,
            "last": None, "forming": None, "min_volume_x": min_volume_x,
@@ -467,7 +475,7 @@ def evaluate(chart, now_utc, setup="orb", or_minutes=15, interval="5m", level=No
         res["opening_range"] = {"high": r2(max(b["h"] for b in or_bars)), "low": r2(min(b["l"] for b in or_bars)),
                                 "minutes": or_minutes, "bars": len(or_bars), "of": n_or,
                                 "complete": local >= or_end, "avg_volume": int(round(avg_vol))}
-    if setup == "orb":
+    if setup in ("orb", "orb_down"):
         if local < or_end:
             res.update(phase="forming", reason="%d of %d range bars closed; the range is set at %s" % (
                 len(or_bars), n_or, short(or_end)))
@@ -475,17 +483,17 @@ def evaluate(chart, now_utc, setup="orb", or_minutes=15, interval="5m", level=No
         if not or_bars:
             res.update(status="no-data", phase="open", reason="Yahoo sent no bars for the opening range")
             return res
-        lvl = max(b["h"] for b in or_bars)
+        lvl = max(b["h"] for b in or_bars) if long else min(b["l"] for b in or_bars)
     else:
         lvl = float(level)
     res["level"] = r2(lvl)
 
-    first_slot = n_or if setup == "orb" else 0
+    first_slot = n_or if setup in ("orb", "orb_down") else 0
     trig, thin = None, []
     for b in bars:
         if b["slot"] < first_slot or b["end"] < before or b["end"] > cutoff:
             continue
-        if b["c"] > lvl:
+        if (b["c"] > lvl) if long else (b["c"] < lvl):
             vx = (b["v"] / avg_vol) if avg_vol else None
             if min_volume_x and (vx is None or vx < min_volume_x):
                 thin.append(b)
@@ -500,7 +508,9 @@ def evaluate(chart, now_utc, setup="orb", or_minutes=15, interval="5m", level=No
     if trig:
         vx = (trig["v"] / avg_vol) if avg_vol else None
         res.update(status="triggered", phase="open" if local < close_dt else "after-close",
-                   reason="the %s bar closed above %s" % (short(trig["et"]), "the range high" if setup == "orb" else "the level"))
+                   reason="the %s bar closed %s %s" % (short(trig["et"]), "above" if long else "below",
+                                                       "the range high" if setup == "orb" else
+                                                       "the range low" if setup == "orb_down" else "the level"))
         res["trigger"] = {"time": ampm(trig["end"]), "close_time": hm(trig["end"]), "bar_start": hm(trig["et"]),
                           "bar_index": trig["slot"], "price": r2(trig["c"]), "close": trig["c"],
                           "volume": trig["v"], "volume_x": r2(vx), "pct_over": r2(100.0 * (trig["c"] / lvl - 1))}
@@ -512,17 +522,21 @@ def evaluate(chart, now_utc, setup="orb", or_minutes=15, interval="5m", level=No
     if not bars:
         res.update(status="no-data", phase="open", reason="Yahoo sent no bars for %s yet" % day.isoformat())
         return res
-    what = "close above the range high ₹%.2f" % lvl if setup == "orb" else "close above ₹%.2f" % lvl
+    edge = "above" if long else "below"
+    what = ("close %s the range %s ₹%.2f" % (edge, "high" if long else "low", lvl)
+            if setup in ("orb", "orb_down") else "close %s ₹%.2f" % (edge, lvl))
     if local >= cutoff and not (pending and pending["end"] <= cutoff):
         res.update(status="expired", phase="after-close" if local >= close_dt else "after-cutoff",
                    reason="no %s by %s, the last time for a new entry" % (what, short(cutoff)))
         return res
     res["phase"] = "open"
     if last["c"] > lvl and last in thin:
-        res["reason"] = "the %s bar closed above at ₹%.2f but on %.2fx the range's volume, under your %.2fx" % (
+        res["reason"] = "the %s bar closed " + ("above" if long else "below") + " at ₹%.2f but on %.2fx the range's volume, under your %.2fx"
+        res["reason"] = res["reason"] % (
             short(last["et"]), last["c"], last["v"] / avg_vol if avg_vol else 0, min_volume_x)
     elif last["c"] > lvl and last["end"] < before:
-        res["reason"] = "the %s bar closed above at ₹%.2f, but no entries before %s (config)" % (
+        res["reason"] = "the %s bar closed " + ("above" if long else "below") + " at ₹%.2f, but no entries before %s (config)"
+        res["reason"] = res["reason"] % (
             short(last["et"]), last["c"], short(before))
     else:
         gap = lvl - last["c"]
@@ -542,7 +556,8 @@ def entry_doc(res, now_utc):
     """trader/entry.json, the contract shape (plus a plain-words reason)."""
     t = res.get("trigger") or {}
     orr = res.get("opening_range")
-    return {"created_by": "trader-entry", "symbol": res["symbol"], "setup": res["setup"], "side": "buy",
+    return {"created_by": "trader-entry", "symbol": res["symbol"], "setup": res["setup"],
+            "side": res.get("side") or "buy",
             "date": res["date"], "status": res["status"], "time": t.get("time"), "bar_start": t.get("bar_start"),
             "bar_index": t.get("bar_index"), "price": t.get("price"), "level": res.get("level"),
             "interval": res["interval"],
@@ -567,8 +582,9 @@ SHORT = {"pre-open": "not open", "forming": "forming", "closed": "closed"}
 
 
 def setup_name(res):
-    if res["setup"] == "orb":
-        return "opening-range breakout (%d-minute range)" % res["or_minutes"]
+    if res["setup"] in ("orb", "orb_down"):
+        return "opening-range %s (%d-minute range)" % (
+            "breakdown" if str(res.get("side")) == "sell" else "breakout", res["or_minutes"])
     return "close above ₹%.2f" % res["level"] if res["level"] is not None else "close above a level"
 
 
@@ -761,16 +777,15 @@ def watch_loop(provider, clock, sleep, emit, opts, every=30, until=None, max_err
 # ---------------------------------------------------------------- commands
 
 def _opts(a, cfg):
-    if a.side in ("sell", "short"):
-        raise EntryError("v2 plans longs only: no short entries. Watch for a buy (--side buy) instead.")
-    if a.setup == "orb" and a.level is not None:
-        raise EntryError("--level is for --setup level (an orb's level is its range high)")
+    if a.setup in ("orb", "orb_down") and a.level is not None:
+        raise EntryError("--level is for --setup level (an orb's level is its range high, "
+                         "an orb_down's its range low)")
     if a.min_volume_x is not None and a.min_volume_x <= 0:
         raise EntryError("--min-volume-x must be above 0")
     if a.level is not None and a.level <= 0:
         raise EntryError("--level must be a price above 0")
     return {"setup": a.setup, "or_minutes": a.or_minutes, "interval": a.interval, "level": a.level,
-            "min_volume_x": a.min_volume_x, "cfg": cfg}
+            "min_volume_x": a.min_volume_x, "cfg": cfg, "side": getattr(a, "side", "buy") or "buy"}
 
 
 def _load(a, sym, now):

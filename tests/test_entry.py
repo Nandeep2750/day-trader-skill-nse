@@ -590,10 +590,17 @@ class Cli(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertIn("NSE only", err)
 
-    def test_longs_only_and_flag_errors(self):
-        code, _, err = run(["check", "RELIANCE", "--offline", REL, "--side", "short"])
+    def test_both_sides_and_flag_errors(self):
+        # --side short watches the range LOW instead of the high. RELIANCE broke out that
+        # day and never closed under 1156.20, so the short side never triggered.
+        code, out, _ = run(["check", "RELIANCE", "--offline", REL, "--side", "short"])
         self.assertEqual(code, 1)
-        self.assertIn("v2 plans longs only", err)
+        self.assertIn("opening-range breakdown", out)
+        self.assertIn("no close below the range low ₹1156.20", out)
+        # the same bars on the long side are a trigger, off the range HIGH
+        code, out, _ = run(["check", "RELIANCE", "--offline", REL])
+        self.assertEqual(code, 0)
+        self.assertIn("closed above the range high ₹1170.50", out)
         code, _, err = run(["check", "RELIANCE", "--offline", REL, "--level", "1100"])
         self.assertIn("--level is for --setup level", err)
         code, _, err = run(["check", "RELIANCE", "--offline", REL, "--setup", "level"])
@@ -655,7 +662,7 @@ class SkillDoc(unittest.TestCase):
         self.assertGreater(len(text.splitlines()), 60)
         self.assertEqual(text[text.index("## Safety"):], risk[risk.index("## Safety"):])
         low = " ".join(text.lower().split())
-        for must in ("bar by bar", "can lag", "day trading loses most people money", "/trader-exit", "longs only",
+        for must in ("bar by bar", "can lag", "day trading loses most people money", "/trader-exit", "--side sell",
                      "in the background", "/loop", "nothing was placed", "9:40 am", "\u20b91174.30", "bar 4",
                      "ist", "nse", "9:15"):
             self.assertIn(must, low)
@@ -665,3 +672,44 @@ class SkillDoc(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class BreakdownTrigger(unittest.TestCase):
+    """--side short watches the opening range's LOW: the mirror of the breakout."""
+
+    def bars(self, closes):
+        """A v8 chart body of 5-minute bars whose highs and lows bracket each close."""
+        base = 1793245500          # 2026-10-29 09:15 IST (03:45 UTC) in epoch seconds
+        return {"chart": {"result": [{
+            "meta": {"symbol": "TEST", "chartPreviousClose": closes[0], "regularMarketTime": base + 300 * len(closes)},
+            "timestamp": [base + 300 * i for i in range(len(closes))],
+            "indicators": {"quote": [{"open": list(closes),
+                                      "high": [c + 1 for c in closes],
+                                      "low": [c - 1 for c in closes],
+                                      "close": list(closes),
+                                      "volume": [10000] * len(closes)}]}}]}}
+
+    def at(self, closes, side, hhmm="2026-10-29 10:30"):
+        return entry.evaluate(chart(self.bars(closes), "TEST"), ist(hhmm), side=side)
+
+    def test_a_close_under_the_range_low_triggers_a_short(self):
+        # the range is the first three bars: low 99, high 104. The fifth closes at 97.
+        res = self.at([100, 103, 100, 99.5, 97.0], "sell")
+        self.assertEqual(res["status"], "triggered")
+        self.assertEqual(res["side"], "sell")
+        self.assertEqual(res["level"], 99.0)                 # the range LOW, not its high
+        self.assertEqual(res["trigger"]["price"], 97.0)
+
+    def test_the_same_bars_do_not_trigger_a_long(self):
+        res = self.at([100, 103, 100, 99.5, 97.0], "buy")
+        self.assertNotEqual(res["status"], "triggered")
+        self.assertEqual(res["level"], 104.0)                # the range HIGH
+
+    def test_a_close_inside_the_range_is_not_a_breakdown(self):
+        res = self.at([100, 103, 100, 99.5, 99.2], "sell")
+        self.assertNotEqual(res["status"], "triggered")
+
+    def test_a_wick_under_the_low_is_not_a_trigger(self):
+        # the close holds at 99.5; only the bar's low reaches 98.5, under the range low 99
+        res = self.at([100, 103, 100, 99.5, 99.5], "sell")
+        self.assertNotEqual(res["status"], "triggered")

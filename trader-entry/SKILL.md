@@ -8,7 +8,8 @@ description: >-
   bar that CLOSES above the range high, or above a level you give it (like a
   20-day high from the scanner), with an optional volume check. Says waiting
   and how far, triggered with the time and the price in rupees, expired, or
-  not open yet, and writes trader/entry.json for /trader-exit. Long side only.
+  not open yet, and writes trader/entry.json for /trader-exit. `--side sell`
+  watches the opening range's low instead of its high, for a short.
   It never places an order. Use when the user says "tell me when to get in",
   "watch RELIANCE", "has it broken out", "did it break the opening range",
   "entry signal", "time my entry", "check my watchlist", or after
@@ -79,7 +80,7 @@ day bar by bar without waiting.
   9:15 bar with zero volume, which pulls that average down.
 - **Time limits.** No entries before 9:30 or after 14:45 (config), and never
   after the 3:30 PM close. Brokers square off intraday (MIS) positions on
-  their own from 3:15 PM (Angel One) or 3:20 PM (Zerodha), so a late entry
+  their own from 3:10 PM (Angel One, an F&O scrip) or 3:25 PM (Zerodha), so a late entry
   has little room.
 - **What it says.** Waiting (and how far the last close is from the level),
   triggered, expired, or no data. Before 9:15: not open yet. Before 9:30: the
@@ -133,7 +134,7 @@ volume) and the trigger moves to 10:00 AM at 1173.80 (the 9:55 bar, 3.38x).
   and can lag. Say so when a minute matters.
 - A signal is information, not an order, and not a promise. Nothing here
   promises winning trades or money.
-- Long side only. v2 plans longs only. If the user wants a short, say that.
+- `--side sell` watches a breakdown. Whether that scrip may actually be short sold is trader-risk's call, not this skill's.
 - One trigger per setup per day: the first close above. Later closes do not
   reset it.
 - Never call an entry early because a bar looks like it will close above.

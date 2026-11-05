@@ -145,10 +145,10 @@ entry 1300.00, stop 1295.50 (the range midpoint), target 1304.50, flat by
 day. A `check` reading the real 15:29 quote, 1307.90:
 
 ```
-NSE OPEN (2026-11-03 15:15 IST, regular session).
+NSE OPEN (2026-11-03 15:20 IST, regular session).
 ALERT RELIANCE is ₹1,307.90: at or above your target ₹1,304.50 (plan target: 1R (one times the risk)).
 If the target rests at the broker (a Robo bracket or a resting LIMIT), check get_orders: filled, record it (trader-broker fill --target-hit, which prints the cancel for the stop). If it is only watched, run /trader-broker flatten (cancels the stop, then sells).
-ALERT Square-off in 5 minutes: Zerodha auto squares off intraday (MIS) positions at 15:20 IST and
+ALERT Square-off in 5 minutes: Zerodha auto squares off intraday (MIS) positions at 15:25 IST and
 charges for it. RELIANCE is still open: trader-broker flatten --symbol RELIANCE builds the ticket
 (cancel the stop, then sell), then trader-risk and your yes.
 ```
